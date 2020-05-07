@@ -7,7 +7,10 @@ import qualified Data.Map as Map
 
 import Debug.Trace
 
-main = play $ forever $ generate (mkStdGen 31)
+main :: IO ()
+main = do
+    gen <- getStdGen
+    play $ forever $ generate gen
 
 {-
  - The Constructors Used By All The Parts Of This System
