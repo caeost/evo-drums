@@ -5,7 +5,9 @@ import Control.Monad.State (State, state, runState)
 import System.Random
 import qualified Data.Map as Map
 
-main = play $ forever $ generate
+import Debug.Trace
+
+main = play $ forever $ generate (mkStdGen 30)
 
 {-
  - The Constructors Used By All The Parts Of This System
@@ -44,10 +46,10 @@ data Sequence = Sequence { seedS :: Int,
  -}
 percussionRange = (0, 46) -- 47 percussion instruments are defined in Euterpea
 
-createPiece :: State StdGen Piece
+createPiece :: RandomGen g => State g Piece
 createPiece = do
         seed <- r
-        instCount <- rR percussionRange
+        instCount <- rR (1, 10) -- hard coded for now
         instruments <- rRs instCount percussionRange
         seqs <- rs instCount
         let sequences = map ((: []) . createSequence) seqs
@@ -72,8 +74,8 @@ createSequence seed = Sequence {seedS=seed, repeats=4} -- temporary fixed value
  - Euterpea handles converting a Piece into MIDI data and hopefully some of its tempo
  - changing, etc. abilities can also be used here.
  -}
-generate :: Music (Pitch)
-generate = loadPiece $ fst $ runState createPiece (mkStdGen 12)
+generate :: RandomGen g => g -> Music (Pitch)
+generate g = loadPiece $ traceShowId $ fst $ runState createPiece g
 
 loadPiece :: Piece -> Music (Pitch)
 loadPiece (Piece s t) = chord $ map loadTrack t
