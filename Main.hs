@@ -15,10 +15,8 @@ main = play $ forever $ generate
  - generated. it represents the composition and provides controls to alter compositions.
  -}
 data Piece = Piece { seed :: Int,
-                     tracks :: [(Instrument, [Sequence])]
+                     tracks :: [(Int, [Sequence])]
                    } deriving (Show)
-
-data Instrument = Int deriving (Show)
 
 data Sequence = Sequence { seedS :: Int,
                            repeats :: Int
@@ -47,7 +45,7 @@ data Sequence = Sequence { seedS :: Int,
 percussionRange = (0, 46) -- 47 percussion instruments are defined in Euterpea
 
 createPiece :: State StdGen Piece
-createPiece i = do
+createPiece = do
         seed <- r
         instCount <- rR percussionRange
         instruments <- rRs instCount percussionRange
@@ -60,10 +58,10 @@ createPiece i = do
           rRs i r = state $ randomRs' i r
 
 randoms' :: (RandomGen g, Random a) => Int -> g -> ([a], g)
-randoms' i g = ((take i $ randoms g), mkStdGen (fst $ next g))
+randoms' i g = ((take i $ randoms g), fst $ split g)
 
 randomRs' :: (RandomGen g, Random a) => Int -> (a,a) -> g -> ([a], g)
-randomRs' i r g = ((take i $ randomRs r g), mkStdGen (fst $ next g))
+randomRs' i r g = ((take i $ randomRs r g), fst $ split g)
 
 createSequence :: Int -> Sequence
 createSequence seed = Sequence {seedS=seed, repeats=4} -- temporary fixed value
@@ -80,16 +78,16 @@ generate = loadPiece $ fst $ runState createPiece (mkStdGen 12)
 loadPiece :: Piece -> Music (Pitch)
 loadPiece (Piece s t) = chord $ map loadTrack t
 
-loadTrack :: (Instrument, [Sequence]) -> Music (Pitch)
+loadTrack :: (Int, [Sequence]) -> Music (Pitch)
 loadTrack (i, seqs) =
     let perc = instrumentToPerc i
     in line $ map (\Sequence{seedS=s, repeats=r} -> genInstrument s perc r) seqs
 
-instrumentToPerc :: Instrument -> Music (Pitch)
-instrumentToPerc i = perc (toEnum i::PercussionSound)
+instrumentToPerc :: Int -> Music (Pitch)
+instrumentToPerc i = perc (toEnum i::PercussionSound) qn --hard coded for now
 
 genInstrument :: Int -> Music (Pitch) -> Int -> Music (Pitch)
 genInstrument seed inst l =
-    let chooser n = if n > 49 then inst else rest qn
-    in line $ map (chooser) $ take l $ randomNumbers seed 0 100
+    let chooser n = if n > 50 then inst else rest qn
+    in line $ map chooser $ take l $ (randomRs (1, 100) (mkStdGen seed) :: [Int])
 
