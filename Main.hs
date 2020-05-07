@@ -2,16 +2,28 @@ module Main where
 import Euterpea hiding (forever)
 import Data.List (unfoldr, nub)
 import Control.Monad.State (State, state, runState)
-import Control.Monad (forever)
+import Control.Monad (forever, when)
 import System.Random
-import qualified Data.Map as Map
+import Control.Concurrent
+import Control.Exception as E
+import Control.Concurrent.STM
 
 import Debug.Trace
 
 main :: IO ()
-main = forever $ do
-    gen <- getStdGen
-    play $ generate gen
+main = do
+    (submit, stop) <- spawnPlaybackChannel
+    forever $ do 
+                c <- getChar
+                if c /= 'n'
+                      then do
+                        atomically (submit playback)
+                      else return ()
+
+playback :: IO ()
+playback = do
+            gen <- getStdGen
+            play $ generate gen
 
 {-
  - The Constructors Used By All The Parts Of This System
@@ -96,4 +108,30 @@ genInstrument :: Int -> Music (Pitch) -> Int -> Music (Pitch)
 genInstrument seed inst l =
     let chooser n = if n > 50 then inst else rest qn
     in line $ map chooser $ take l $ (randomRs (1, 100) (mkStdGen seed) :: [Int])
+
+{--
+ - Utility functions for overall system
+ -}
+
+-- from https://wiki.haskell.org/Background_thread_example
+spawnPlaybackChannel :: IO ((IO () -> STM ()), IO ())
+spawnPlaybackChannel = do
+    workChan <- atomically newTChan
+    runCount <- atomically (newTVar True)
+
+    let stop = atomically (writeTVar runCount False)
+        die e = do id <- myThreadId
+                   print ("Thread "++show id++" died with exception "++show (e :: ErrorCall))
+                   stop
+        work = do mJob <- atomically (readTChan workChan)
+                  case mJob of Nothing -> stop
+                               Just job -> E.catch job die >> work
+    forkIO work
+
+    let stopCommand = do atomically (writeTChan workChan Nothing)
+                         atomically (do running <- readTVar runCount
+                                        when (running) retry)
+    return (writeTChan workChan . Just, stopCommand)
+
+
 
