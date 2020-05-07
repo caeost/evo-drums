@@ -1,16 +1,17 @@
 module Main where
-import Euterpea
+import Euterpea hiding (forever)
 import Data.List (unfoldr, nub)
 import Control.Monad.State (State, state, runState)
+import Control.Monad (forever)
 import System.Random
 import qualified Data.Map as Map
 
 import Debug.Trace
 
 main :: IO ()
-main = do
+main = forever $ do
     gen <- getStdGen
-    play $ forever $ generate gen
+    play $ generate gen
 
 {-
  - The Constructors Used By All The Parts Of This System
@@ -21,11 +22,11 @@ main = do
  -}
 data Piece = Piece { seed :: Int,
                      tracks :: [(Int, [Sequence])]
-                   } deriving (Show)
+                   } deriving (Show, Read, Eq)
 
 data Sequence = Sequence { seedS :: Int,
                            repeats :: Int
-                         } deriving (Show)
+                         } deriving (Show, Read, Eq)
 {--
  - Generating and manipulating a Piece
  -
