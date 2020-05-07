@@ -7,7 +7,7 @@ import qualified Data.Map as Map
 
 import Debug.Trace
 
-main = play $ forever $ generate (mkStdGen 30)
+main = play $ forever $ generate (mkStdGen 31)
 
 {-
  - The Constructors Used By All The Parts Of This System
