@@ -1,9 +1,10 @@
 module Main where
-import Euterpea hiding (forever)
+import Euterpea
 import Data.List (unfoldr, nub)
 import Control.Monad.State (State, state, runState)
 import Control.Monad (forever, when)
 import System.Random
+import System.IO
 import Control.Concurrent
 import Control.Exception as E
 import Control.Concurrent.STM
@@ -12,18 +13,15 @@ import Debug.Trace
 
 main :: IO ()
 main = do
+    hSetBuffering stdin NoBuffering -- to respond immediately to input
     (submit, stop) <- spawnPlaybackChannel
-    forever $ do 
+    Control.Monad.forever $ do
                 c <- getChar
-                if c /= 'n'
-                      then do
-                        atomically (submit playback)
-                      else return ()
-
-playback :: IO ()
-playback = do
-            gen <- getStdGen
-            play $ generate gen
+                case c of 'n' -> do
+                                  gen <- newStdGen
+                                  atomically . submit . play . Euterpea.forever $ generate gen
+                          's' -> stop
+                          _ -> return ()
 
 {-
  - The Constructors Used By All The Parts Of This System
