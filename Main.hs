@@ -1,6 +1,8 @@
 module Main where
+
 import Euterpea
 import Data.List (unfoldr, nub)
+import Data.List as List
 import Control.Monad.State (State, state, runState)
 import Control.Monad (forever, when)
 import System.Random
@@ -14,14 +16,15 @@ import Debug.Trace
 main :: IO ()
 main = do
     hSetBuffering stdin NoBuffering -- to respond immediately to input
-    (submit, stop) <- spawnPlaybackChannel
+    (sendToPlayer, stop) <- spawnPlaybackChannel
     Control.Monad.forever $ do
                 c <- getChar
                 case c of 'n' -> do
-                                  gen <- newStdGen
-                                  atomically . submit . play . Euterpea.forever $ generate gen
+                                  let atomicPlay = atomically . sendToPlayer
+                                  stdGen <- newStdGen
+                                  atomicPlay $ generate stdGen
                           's' -> stop
-                          _ -> return ()
+                          _   -> return ()
 
 {-
  - The Constructors Used By All The Parts Of This System
@@ -30,11 +33,12 @@ main = do
  - The Piece is random weights and settings from which a consistent set of music will be
  - generated. it represents the composition and provides controls to alter compositions.
  -}
-data Piece = Piece { seed :: Int,
+data Piece = Piece { seed   :: Int,
                      tracks :: [(Int, [Sequence])]
                    } deriving (Show, Read, Eq)
 
-data Sequence = Sequence { seedS :: Int,
+data Sequence = Sequence { seedS   :: Int,
+                           beats   :: Int,
                            repeats :: Int
                          } deriving (Show, Read, Eq)
 {--
@@ -60,14 +64,14 @@ data Sequence = Sequence { seedS :: Int,
  -}
 percussionRange = (0, 46) -- 47 percussion instruments are defined in Euterpea
 
-createPiece :: RandomGen g => State g Piece
-createPiece = do
+createPiece :: RandomGen g => g -> Piece
+createPiece g = fst $ runState (do
         seed <- r
         instCount <- rR (1, 10) -- hard coded for now
         instruments <- rRs instCount percussionRange
         seqs <- rs instCount
         let sequences = map ((: []) . createSequence) seqs
-        return Piece {seed=seed, tracks= zip instruments sequences}
+        return Piece {seed=seed, tracks= zip instruments sequences}) g
     where r = state random
           rR = state . randomR
           rs = state . randoms'
@@ -80,7 +84,9 @@ randomRs' :: (RandomGen g, Random a) => Int -> (a,a) -> g -> ([a], g)
 randomRs' i r g = ((take i $ randomRs r g), fst $ split g)
 
 createSequence :: Int -> Sequence
-createSequence seed = Sequence {seedS=seed, repeats=4} -- temporary fixed value
+createSequence seed = Sequence {seedS=seed,
+                                beats=4, -- temporary fixed value
+                                repeats=2} -- remporary fixed value
 
 {--
  - Turning a Piece into a Euterpea Music object to be played
@@ -89,47 +95,56 @@ createSequence seed = Sequence {seedS=seed, repeats=4} -- temporary fixed value
  - changing, etc. abilities can also be used here.
  -}
 generate :: RandomGen g => g -> Music (Pitch)
-generate g = loadPiece $ traceShowId $ fst $ runState createPiece g
+generate g = loadPiece $ traceShowId $ createPiece g
 
 loadPiece :: Piece -> Music (Pitch)
-loadPiece (Piece s t) = chord $ map loadTrack t
+loadPiece (Piece s t) = line $ map chord $ List.transpose $ map loadTrack t
 
-loadTrack :: (Int, [Sequence]) -> Music (Pitch)
+-- Turns a track descriptor into a list of measures
+loadTrack :: (Int, [Sequence]) -> [Music (Pitch)]
 loadTrack (i, seqs) =
     let perc = instrumentToPerc i
-    in line $ map (\Sequence{seedS=s, repeats=r} -> genInstrument s perc r) seqs
+        seqToMeasures :: Sequence -> [Music (Pitch)]
+        seqToMeasures seq = take (repeats seq) $ repeat (seqToMeasure perc seq)
+    in foldl1 (++) $ map seqToMeasures seqs
 
 instrumentToPerc :: Int -> Music (Pitch)
 instrumentToPerc i = perc (toEnum i::PercussionSound) qn --hard coded for now
 
-genInstrument :: Int -> Music (Pitch) -> Int -> Music (Pitch)
-genInstrument seed inst l =
-    let chooser n = if n > 50 then inst else rest qn
-    in line $ map chooser $ take l $ (randomRs (1, 100) (mkStdGen seed) :: [Int])
+seqToMeasure :: Music (Pitch) -> Sequence -> Music (Pitch)
+seqToMeasure inst Sequence{seedS=s, beats=b} =
+    let chooser n = if n > 50 then inst else rest qn -- hard coded for now
+        randomChanceList = randomRs (1, 100) (mkStdGen s) :: [Int]
+    in line $ map chooser $ take b randomChanceList
 
 {--
  - Utility functions for overall system
  -}
 
--- from https://wiki.haskell.org/Background_thread_example
-spawnPlaybackChannel :: IO ((IO () -> STM ()), IO ())
+-- based off of https://wiki.haskell.org/Background_thread_example
+spawnPlaybackChannel :: IO (Music Pitch -> STM (), IO ())
 spawnPlaybackChannel = do
     workChan <- atomically newTChan
-    runCount <- atomically (newTVar True)
 
-    let stop = atomically (writeTVar runCount False)
-        die e = do id <- myThreadId
-                   print ("Thread "++show id++" died with exception "++show (e :: ErrorCall))
+    let stop    = atomically(writeTChan workChan Nothing)
+        die e   = do
+                   id <- myThreadId
+                   print ("Playback Thread " ++ show id ++ " died with exception " ++ show (e :: ErrorCall))
                    stop
-        work = do mJob <- atomically (readTChan workChan)
-                  case mJob of Nothing -> stop
-                               Just job -> E.catch job die >> work
+        pieceWork :: [Music Pitch] -> IO ()
+        pieceWork (x:xs) = do
+                   mJob <- atomically(tryPeekTChan workChan)
+                   case mJob of Nothing -> do
+                                             play x
+                                             pieceWork (xs ++ [x])
+                                Just job -> work
+        work :: IO ()
+        work    = do
+                   mJob <- atomically(readTChan workChan) -- this should block on receiving a value
+                   case mJob of Nothing -> work -- waiting on a new job
+                                Just music -> pieceWork $ lineToList $ traceShowId music
+
     forkIO work
 
-    let stopCommand = do atomically (writeTChan workChan Nothing)
-                         atomically (do running <- readTVar runCount
-                                        when (running) retry)
-    return (writeTChan workChan . Just, stopCommand)
-
-
+    return (writeTChan workChan . Just, stop)
 
