@@ -16,27 +16,27 @@ import Debug.Trace
 main :: IO ()
 main = do
     hSetBuffering stdin NoBuffering -- to respond immediately to input
-    (sendToPlayer, stop) <- spawnPlaybackChannel
+    (sendToPlayer, stop) <- spawnPlaybackChannel -- all instructions take effect after the current measure
     let act :: Maybe (Piece) -> IO ()
-        act mEx = do
-            let atomicPlay = atomically . sendToPlayer . loadPiece . traceShowId
+        act mEx = do --mEx is Maybe (the existing piece) if there is one playing
+            let atomicPlay = sendToPlayer . loadPiece . traceShowId
             c <- getChar
-            case c of 'n' -> do
+            case c of 'n' -> do -- generate a new piece
                               stdGen <- newStdGen
                               let piece = createPiece stdGen
                               atomicPlay piece
                               act $ Just(piece)
-                      's' -> do
+                      's' -> do -- stop playing music
                               stop
                               act Nothing
-                      'm' -> do
+                      'm' -> do -- perform a random mutation of the playing track
                               case mEx of Nothing -> act Nothing
                                           Just existing -> do
                                                             stdGen <- newStdGen
                                                             let piece = mutate stdGen existing
                                                             atomicPlay piece
                                                             act $ Just(piece)
-                      _   -> act Nothing
+                      _   -> act mEx -- default case do nothing
     act Nothing
 
 {-
@@ -109,10 +109,18 @@ addTrack g p =
     let newTrack = (fst $ randomR percussionRange g, createSequences (fst $ random g))
     in p{tracks=newTrack:(tracks p)}
 
+removeTrack :: RandomGen g => g -> Piece -> Piece
+removeTrack g p =
+    let indexToRemove = fst $ randomR (0, (length (tracks p)) - 1) g
+        (left, (_:right)) = splitAt indexToRemove (tracks p)
+    in p{tracks=(left++right)}
+
 -- take a random gen and return a mutator with a split off random gen applied to it
 mutate :: RandomGen g => g -> Piece -> Piece
 mutate g =
-    let mutators = [addTrack]
+    let mutators = [
+          addTrack,
+          removeTrack]
         (index, nextG) = randomR (0, (length mutators) - 1) g
     in (mutators!!index) nextG
 
@@ -146,29 +154,29 @@ seqToMeasure inst Sequence{seedS=s, beats=b} =
  -}
 
 -- based off of https://wiki.haskell.org/Background_thread_example
-spawnPlaybackChannel :: IO (Music Pitch -> STM (), IO ())
+spawnPlaybackChannel :: IO (Music Pitch -> IO (), IO ())
 spawnPlaybackChannel = do
-    workChan <- atomically newTChan
+    workVar <- atomically newEmptyTMVar
 
-    let stop    = atomically(writeTChan workChan Nothing)
+    let stop    = atomically(putTMVar workVar Nothing)
         die e   = do
                    id <- myThreadId
                    print ("Playback Thread " ++ show id ++ " died with exception " ++ show (e :: ErrorCall))
                    stop
         pieceWork :: [Music Pitch] -> IO ()
         pieceWork (x:xs) = do
-                   mJob <- atomically(tryPeekTChan workChan)
-                   case mJob of Nothing -> do
+                   noNewMessage <- atomically(isEmptyTMVar workVar) -- peek at the state
+                   if noNewMessage then do
                                              play x
                                              pieceWork (xs ++ [x])
-                                Just job -> work -- "job" could be a Nothing here, work contains the logic to figure it out
+                                   else work
         work :: IO ()
         work    = do
-                   mJob <- atomically(readTChan workChan) -- this should block on receiving a value
+                   mJob <- atomically(takeTMVar workVar) -- this should block on receiving a value
                    case mJob of Nothing -> work -- waiting on a new job
                                 Just music -> pieceWork $ lineToList music
 
     forkIO work
 
-    return (writeTChan workChan . Just, stop)
+    return (atomically . putTMVar workVar . Just, stop)
 
