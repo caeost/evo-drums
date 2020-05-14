@@ -52,7 +52,8 @@ data Piece = Piece { seed   :: Int,
 
 data Sequence = Sequence { seedS   :: Int,
                            beats   :: Int,
-                           repeats :: Int
+                           repeats :: Int,
+                           playWeight :: Int
                          } deriving (Show, Read, Eq)
 {--
  - Generating and manipulating a Piece
@@ -102,7 +103,17 @@ createSequences seed = [createSequence seed] -- temp
 createSequence :: Int -> Sequence
 createSequence seed = Sequence {seedS=seed,
                                 beats=4, -- temporary fixed value
-                                repeats=2} -- remporary fixed value
+                                repeats=2,-- remporary fixed value
+                                playWeight=0} -- remporary fixed value
+
+addSequence :: RandomGen g => g -> Piece -> Piece
+addSequence g p =
+  let i = fst $ randomR (0, (length (tracks p)) - 1) g
+      nSeed = fst $ random g
+      changeTrack (i, seqs) = (i, (createSequence nSeed):seqs)
+      traver i (x:xs) = (if i == 0 then changeTrack x else x):(traver (i-1) xs)
+      traver i []     = []
+  in p{tracks=(traver i (tracks p))}
 
 addTrack :: RandomGen g => g -> Piece -> Piece
 addTrack g p =
@@ -120,7 +131,8 @@ mutate :: RandomGen g => g -> Piece -> Piece
 mutate g =
     let mutators = [
           addTrack,
-          removeTrack]
+          removeTrack,
+          addSequence]
         (index, nextG) = randomR (0, (length mutators) - 1) g
     in (mutators!!index) nextG
 
@@ -137,15 +149,17 @@ loadPiece (Piece s t) = line $ map chord $ List.transpose $ map loadTrack t -- m
 loadTrack :: (Int, [Sequence]) -> [Music (Pitch)]
 loadTrack (i, seqs) =
     let perc = instrumentToPerc i
-        seqToMeasures seq = take (repeats seq) $ repeat (seqToMeasure perc seq)
-    in foldl1 (++) $ map seqToMeasures seqs
+    in foldl1 (++) $ map (seqToMeasures perc) seqs
 
 instrumentToPerc :: Int -> Music (Pitch)
 instrumentToPerc i = perc (toEnum i::PercussionSound) qn --hard coded for now
 
+seqToMeasures :: Music (Pitch) -> Sequence -> [Music (Pitch)]
+seqToMeasures perc seq = take (repeats seq) $ repeat (seqToMeasure perc seq)
+
 seqToMeasure :: Music (Pitch) -> Sequence -> Music (Pitch)
-seqToMeasure inst Sequence{seedS=s, beats=b} =
-    let chooser n = if n > 50 then inst else rest qn -- hard coded for now
+seqToMeasure inst Sequence{seedS=s, beats=b, playWeight=w} =
+    let chooser n = if (n + w) > 50 then inst else rest qn -- hard coded for now
         randomChanceList = randomRs (1, 100) (mkStdGen s) :: [Int]
     in line $ map chooser $ take b randomChanceList
 
