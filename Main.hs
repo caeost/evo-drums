@@ -17,14 +17,27 @@ main :: IO ()
 main = do
     hSetBuffering stdin NoBuffering -- to respond immediately to input
     (sendToPlayer, stop) <- spawnPlaybackChannel
-    Control.Monad.forever $ do
-                c <- getChar
-                case c of 'n' -> do
-                                  let atomicPlay = atomically . sendToPlayer
-                                  stdGen <- newStdGen
-                                  atomicPlay $ generate stdGen
-                          's' -> stop
-                          _   -> return ()
+    let act :: Maybe (Piece) -> IO ()
+        act mEx = do
+            let atomicPlay = atomically . sendToPlayer . loadPiece . traceShowId
+            c <- getChar
+            case c of 'n' -> do
+                              stdGen <- newStdGen
+                              let piece = createPiece stdGen
+                              atomicPlay piece
+                              act $ Just(piece)
+                      's' -> do
+                              stop
+                              act Nothing
+                      'm' -> do
+                              case mEx of Nothing -> act Nothing
+                                          Just existing -> do
+                                                            stdGen <- newStdGen
+                                                            let piece = mutate stdGen existing
+                                                            atomicPlay piece
+                                                            act $ Just(piece)
+                      _   -> act Nothing
+    act Nothing
 
 {-
  - The Constructors Used By All The Parts Of This System
@@ -70,7 +83,7 @@ createPiece g = fst $ runState (do
         instCount <- rR (1, 10) -- hard coded for now
         instruments <- rRs instCount percussionRange
         seqs <- rs instCount
-        let sequences = map ((: []) . createSequence) seqs
+        let sequences = map createSequences seqs
         return Piece {seed=seed, tracks= zip instruments sequences}) g
     where r = state random
           rR = state . randomR
@@ -83,10 +96,25 @@ randoms' i g = ((take i $ randoms g), fst $ split g)
 randomRs' :: (RandomGen g, Random a) => Int -> (a,a) -> g -> ([a], g)
 randomRs' i r g = ((take i $ randomRs r g), fst $ split g)
 
+createSequences :: Int -> [Sequence]
+createSequences seed = [createSequence seed] -- temp
+
 createSequence :: Int -> Sequence
 createSequence seed = Sequence {seedS=seed,
                                 beats=4, -- temporary fixed value
                                 repeats=2} -- remporary fixed value
+
+addTrack :: RandomGen g => g -> Piece -> Piece
+addTrack g p =
+    let newTrack = (fst $ randomR percussionRange g, createSequences (fst $ random g))
+    in p{tracks=newTrack:(tracks p)}
+
+-- take a random gen and return a mutator with a split off random gen applied to it
+mutate :: RandomGen g => g -> Piece -> Piece
+mutate g =
+    let mutators = [addTrack]
+        (index, nextG) = randomR (0, (length mutators) - 1) g
+    in (mutators!!index) nextG
 
 {--
  - Turning a Piece into a Euterpea Music object to be played
@@ -94,17 +122,13 @@ createSequence seed = Sequence {seedS=seed,
  - Euterpea handles converting a Piece into MIDI data and hopefully some of its tempo
  - changing, etc. abilities can also be used here.
  -}
-generate :: RandomGen g => g -> Music (Pitch)
-generate g = loadPiece $ traceShowId $ createPiece g
-
 loadPiece :: Piece -> Music (Pitch)
-loadPiece (Piece s t) = line $ map chord $ List.transpose $ map loadTrack t
+loadPiece (Piece s t) = line $ map chord $ List.transpose $ map loadTrack t -- may need to make infinite lists to match tracks up
 
 -- Turns a track descriptor into a list of measures
 loadTrack :: (Int, [Sequence]) -> [Music (Pitch)]
 loadTrack (i, seqs) =
     let perc = instrumentToPerc i
-        seqToMeasures :: Sequence -> [Music (Pitch)]
         seqToMeasures seq = take (repeats seq) $ repeat (seqToMeasure perc seq)
     in foldl1 (++) $ map seqToMeasures seqs
 
@@ -137,12 +161,12 @@ spawnPlaybackChannel = do
                    case mJob of Nothing -> do
                                              play x
                                              pieceWork (xs ++ [x])
-                                Just job -> work
+                                Just job -> work -- "job" could be a Nothing here, work contains the logic to figure it out
         work :: IO ()
         work    = do
                    mJob <- atomically(readTChan workChan) -- this should block on receiving a value
                    case mJob of Nothing -> work -- waiting on a new job
-                                Just music -> pieceWork $ lineToList $ traceShowId music
+                                Just music -> pieceWork $ lineToList music
 
     forkIO work
 
