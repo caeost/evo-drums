@@ -106,14 +106,24 @@ createSequence seed = Sequence {seedS=seed,
                                 repeats=2,-- remporary fixed value
                                 playWeight=0} -- remporary fixed value
 
+-- take a random gen and return a mutator with a split off random gen applied to it
+mutate :: RandomGen g => g -> Piece -> Piece
+mutate g =
+    let mutators = [
+          addTrack,
+          removeTrack,
+          addSequence]
+        (index, nextG) = randomR (0, (length mutators) - 1) g
+    in (mutators!!index) nextG
+
 addSequence :: RandomGen g => g -> Piece -> Piece
 addSequence g p =
-  let i = fst $ randomR (0, (length (tracks p)) - 1) g
-      nSeed = fst $ random g
-      changeTrack (i, seqs) = (i, (createSequence nSeed):seqs)
-      traver i (x:xs) = (if i == 0 then changeTrack x else x):(traver (i-1) xs)
-      traver i []     = []
-  in p{tracks=(traver i (tracks p))}
+    let i = fst $ randomR (0, (length (tracks p)) - 1) g
+        nSeed = fst $ random g
+        changeTrack (i, seqs) = (i, (createSequence nSeed):seqs)
+        traver i (x:xs) = (if i == 0 then changeTrack x else x):(traver (i-1) xs)
+        traver i []     = []
+    in p{tracks=(traver i (tracks p))}
 
 addTrack :: RandomGen g => g -> Piece -> Piece
 addTrack g p =
@@ -125,16 +135,6 @@ removeTrack g p =
     let indexToRemove = fst $ randomR (0, (length (tracks p)) - 1) g
         (left, (_:right)) = splitAt indexToRemove (tracks p)
     in p{tracks=(left++right)}
-
--- take a random gen and return a mutator with a split off random gen applied to it
-mutate :: RandomGen g => g -> Piece -> Piece
-mutate g =
-    let mutators = [
-          addTrack,
-          removeTrack,
-          addSequence]
-        (index, nextG) = randomR (0, (length mutators) - 1) g
-    in (mutators!!index) nextG
 
 {--
  - Turning a Piece into a Euterpea Music object to be played
@@ -172,7 +172,12 @@ spawnPlaybackChannel :: IO (Music Pitch -> IO (), IO ())
 spawnPlaybackChannel = do
     workVar <- atomically newEmptyTMVar
 
-    let stop    = atomically(putTMVar workVar Nothing)
+    let write j = atomically(do
+                              empty <- isEmptyTMVar workVar
+                              if empty
+                                  then putTMVar workVar j
+                                  else swapTMVar workVar j >> return ())
+        stop    = atomically(putTMVar workVar Nothing)
         die e   = do
                    id <- myThreadId
                    print ("Playback Thread " ++ show id ++ " died with exception " ++ show (e :: ErrorCall))
@@ -192,5 +197,5 @@ spawnPlaybackChannel = do
 
     forkIO work
 
-    return (atomically . putTMVar workVar . Just, stop)
+    return (write . Just, stop)
 
