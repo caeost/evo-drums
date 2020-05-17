@@ -1,9 +1,8 @@
 module Main where
 
 import Euterpea
-import Data.List (unfoldr, nub)
 import Data.List as List
-import Control.Monad.State (State, state, runState)
+import Control.Monad.State (State, state, runState, get)
 import Control.Monad (forever, when)
 import System.Random
 import System.IO
@@ -47,14 +46,20 @@ main = do
  - generated. it represents the composition and provides controls to alter compositions.
  -}
 data Piece = Piece { seed   :: Int,
-                     tracks :: [(Int, [Sequence])]
+                     beats   :: Int,
+                     parts :: [Part]
                    } deriving (Show, Read, Eq)
 
-data Sequence = Sequence { seedS   :: Int,
-                           beats   :: Int,
-                           repeats :: Int,
-                           playWeight :: Int
-                         } deriving (Show, Read, Eq)
+data Part = Part { pSeed   :: Int,
+                   repeats :: Int,
+                   tracks :: [Track]
+                 } deriving (Show, Read, Eq)
+
+data Track = Track  { tSeed :: Int,
+                      inst :: Int,
+                      playWeight :: Int
+                    } deriving (Show, Read, Eq)
+
 {--
  - Generating and manipulating a Piece
  -
@@ -83,12 +88,15 @@ createPiece g = fst $ runState (do
         seed <- r
         instCount <- rR (1, 10) -- hard coded for now
         instruments <- rRs instCount percussionRange
-        seqs <- rs instCount
-        let sequences = map createSequences seqs
-        return Piece {seed=seed, tracks= zip instruments sequences}) g
+
+        gen <- get
+        return Piece {seed=seed,
+                      beats=4,
+                      parts=[createPart instruments gen]
+                     }
+        ) g
     where r = state random
           rR = state . randomR
-          rs = state . randoms'
           rRs i r = state $ randomRs' i r
 
 randoms' :: (RandomGen g, Random a) => Int -> g -> ([a], g)
@@ -97,44 +105,89 @@ randoms' i g = ((take i $ randoms g), fst $ split g)
 randomRs' :: (RandomGen g, Random a) => Int -> (a,a) -> g -> ([a], g)
 randomRs' i r g = ((take i $ randomRs r g), fst $ split g)
 
-createSequences :: Int -> [Sequence]
-createSequences seed = [createSequence seed] -- temp
+createPart :: RandomGen g => [Int] -> g -> Part
+createPart insts gen =
+    let (val, nextGen) = random gen
+    in Part { pSeed=val,
+              repeats=2, -- temporary fixed value
+              tracks=createTracks insts nextGen
+            }
 
-createSequence :: Int -> Sequence
-createSequence seed = Sequence {seedS=seed,
-                                beats=4, -- temporary fixed value
-                                repeats=2,-- remporary fixed value
-                                playWeight=0} -- remporary fixed value
+createTracks :: RandomGen g => [Int] -> g -> [Track]
+createTracks [] _ = []
+createTracks (i:is) gen =
+    let (val, nextGen) = random gen
+        seq = createTrack i val
+    in seq : createTracks is nextGen
+
+createTrack :: Int -> Int -> Track
+createTrack inst seed = Track {tSeed=seed,
+                               inst=inst,
+                               playWeight=0} -- remporary fixed value
 
 -- take a random gen and return a mutator with a split off random gen applied to it
 mutate :: RandomGen g => g -> Piece -> Piece
-mutate g =
+mutate gen =
     let mutators = [
-          addTrack,
-          removeTrack,
-          addSequence]
-        (index, nextG) = randomR (0, (length mutators) - 1) g
-    in (mutators!!index) nextG
+          addPart,
+          removePart,
+          addTrack]
+        (index, nextGen) = randomR (0, (length mutators) - 1) gen
+    in  (mutators!!index) nextGen
 
-addSequence :: RandomGen g => g -> Piece -> Piece
-addSequence g p =
-    let i = fst $ randomR (0, (length (tracks p)) - 1) g
-        nSeed = fst $ random g
-        changeTrack (i, seqs) = (i, (createSequence nSeed):seqs)
-        traver i (x:xs) = (if i == 0 then changeTrack x else x):(traver (i-1) xs)
-        traver i []     = []
-    in p{tracks=(traver i (tracks p))}
+addPart :: RandomGen g => g -> Piece -> Piece
+addPart g p =
+    let oldParts = parts p
+        indexToAdd = fst $ randomR (0, (length oldParts) - 1) g
+        (left, right) = splitAt indexToAdd (parts p)
+        insts [] = []
+        insts (t:ts) = (inst t): insts ts
+        newPart = createPart (insts $ tracks $ head oldParts)  g
+    in  p{parts=(left++(newPart:right))}
+
+removePart :: RandomGen g => g -> Piece -> Piece
+removePart g p =
+    let pas = (parts p)
+        indexToRemove = fst $ randomR (0, (length pas) - 1) g
+        (left, (_:right)) = splitAt indexToRemove pas
+    in  if (length pas) > 1 then p{parts=(left++right)} else p
 
 addTrack :: RandomGen g => g -> Piece -> Piece
 addTrack g p =
-    let newTrack = (fst $ randomR percussionRange g, createSequences (fst $ random g))
-    in p{tracks=newTrack:(tracks p)}
+    let (inst, nextG) = randomR percussionRange g -- should probably check for collision
+        (seed, nexterG) = random nextG
+        adder g pa = pa{tracks=((createTrack inst seed):(tracks pa))}
+    in  whichParts nexterG p adder
 
-removeTrack :: RandomGen g => g -> Piece -> Piece
-removeTrack g p =
-    let indexToRemove = fst $ randomR (0, (length (tracks p)) - 1) g
-        (left, (_:right)) = splitAt indexToRemove (tracks p)
-    in p{tracks=(left++right)}
+whichParts :: RandomGen g => g -> Piece -> (g -> Part -> Part) -> Piece
+whichParts g = 
+    let options = [
+          mutateAllParts,
+          mutateRandomPart]
+        (index, nextG) = randomR (0, (length options) - 1) g
+    in  (options!!index) nextG
+
+mutateAllParts :: RandomGen g => g -> Piece -> (g -> Part -> Part) -> Piece
+mutateAllParts   g p t = p{parts=mutateAllInList g (parts p) t}
+
+mutateRandomPart :: RandomGen g => g -> Piece -> (g -> Part -> Part) -> Piece
+mutateRandomPart g p t = p{parts=mutateRandomInList g (parts p) t}
+
+mutateAllInList :: RandomGen g => g -> [a] -> (g -> a -> a) -> [a]
+mutateAllInList g as f =
+    let mutater g t [] = []
+        mutater g t (a:as) =
+            let (_, ng) = next g
+                (_, nng)= next ng
+            in  t ng a : mutater nng t as
+    in  mutater g f as
+
+mutateRandomInList :: RandomGen g => g -> [a] -> (g -> a -> a) -> [a]
+mutateRandomInList g as f =
+    let (val, nextGen) = randomR (0, (length as) - 1) g
+        mutater _ _ [] = []
+        mutater f i (a:as) = (if i == 0 then f a else a):(mutater f (i - 1) as)
+    in  mutater (f nextGen) val as
 
 {--
  - Turning a Piece into a Euterpea Music object to be played
@@ -143,25 +196,20 @@ removeTrack g p =
  - changing, etc. abilities can also be used here.
  -}
 loadPiece :: Piece -> Music (Pitch)
-loadPiece (Piece s t) = line $ map chord $ List.transpose $ map loadTrack t -- may need to make infinite lists to match tracks up
+loadPiece (Piece s b p) = line $ foldl (++) [] $ map (partToMeasures b) p -- may need to make infinite lists to match tracks up
 
--- Turns a track descriptor into a list of measures
-loadTrack :: (Int, [Sequence]) -> [Music (Pitch)]
-loadTrack (i, seqs) =
-    let perc = instrumentToPerc i
-    in foldl1 (++) $ map (seqToMeasures perc) seqs
+partToMeasures :: Int -> Part -> [Music (Pitch)]
+partToMeasures b pa = take (repeats pa) $ repeat (chord $ map (trackToMeasure b) (tracks pa))
+
+trackToMeasure :: Int -> Track -> Music (Pitch)
+trackToMeasure b Track{tSeed=s, inst=i, playWeight=w} =
+    let inst = instrumentToPerc i
+        chooser n = if (n + w) > 50 then inst else rest qn -- hard coded for now
+        randomChanceList = randomRs (1, 100) (mkStdGen s) :: [Int]
+    in line $ map chooser $ take b randomChanceList
 
 instrumentToPerc :: Int -> Music (Pitch)
 instrumentToPerc i = perc (toEnum i::PercussionSound) qn --hard coded for now
-
-seqToMeasures :: Music (Pitch) -> Sequence -> [Music (Pitch)]
-seqToMeasures perc seq = take (repeats seq) $ repeat (seqToMeasure perc seq)
-
-seqToMeasure :: Music (Pitch) -> Sequence -> Music (Pitch)
-seqToMeasure inst Sequence{seedS=s, beats=b, playWeight=w} =
-    let chooser n = if (n + w) > 50 then inst else rest qn -- hard coded for now
-        randomChanceList = randomRs (1, 100) (mkStdGen s) :: [Int]
-    in line $ map chooser $ take b randomChanceList
 
 {--
  - Utility functions for overall system
@@ -177,12 +225,13 @@ spawnPlaybackChannel = do
                               if empty
                                   then putTMVar workVar j
                                   else swapTMVar workVar j >> return ())
-        stop    = atomically(putTMVar workVar Nothing)
+        stop    = write Nothing
         die e   = do
                    id <- myThreadId
                    print ("Playback Thread " ++ show id ++ " died with exception " ++ show (e :: ErrorCall))
                    stop
         pieceWork :: [Music Pitch] -> IO ()
+        pieceWork [] = work
         pieceWork (x:xs) = do
                    noNewMessage <- atomically(isEmptyTMVar workVar) -- peek at the state
                    if noNewMessage then do
