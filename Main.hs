@@ -124,7 +124,8 @@ createTrack :: Int -> Int -> Track
 createTrack inst seed = Track {tSeed=seed,
                                inst=inst,
                                playWeight=0} -- remporary fixed value
-
+{- Mutation station
+ -}
 -- take a random gen and return a mutator with a split off random gen applied to it
 mutate :: RandomGen g => g -> Piece -> Piece
 mutate gen =
@@ -153,12 +154,20 @@ removePart g p =
     in  if (length pas) > 1 then p{parts=(left++right)} else p
 
 addTrack :: RandomGen g => g -> Piece -> Piece
-addTrack g p =
+addTrack g p = -- adds the same track to each part changed
     let (inst, nextG) = randomR percussionRange g -- should probably check for collision
         (seed, nexterG) = random nextG
-        adder g pa = pa{tracks=((createTrack inst seed):(tracks pa))}
+        nTrack = createTrack inst seed
+        adder _ pa = pa{tracks=nTrack:(tracks pa)}
     in  whichParts nexterG p adder
 
+-- removeSomeTracks :: RandomGen g => g -> Piece -> Piece
+-- removeSomeTracks g p =
+--     let remove g pa = pa{tracks=}
+--     in  whichParts g p remover
+
+{- Mutator utils
+ -}
 whichParts :: RandomGen g => g -> Piece -> (g -> Part -> Part) -> Piece
 whichParts g = 
     let options = [
@@ -178,8 +187,7 @@ mutateAllInList g as f =
     let mutater g t [] = []
         mutater g t (a:as) =
             let (_, ng) = next g
-                (_, nng)= next ng
-            in  t ng a : mutater nng t as
+            in  t ng a : mutater ng t as
     in  mutater g f as
 
 mutateRandomInList :: RandomGen g => g -> [a] -> (g -> a -> a) -> [a]
