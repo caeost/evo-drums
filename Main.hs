@@ -12,31 +12,75 @@ import Control.Concurrent.STM
 
 import Debug.Trace
 
+{- Evo-Drums
+ -
+ - The goal of this is to provide a drummer that I can jam along with.
+ -
+ - This means the goal is not to make totally wild music or to fit to some style or anything
+ - like that. The music it produces should have a decent hit rate of being "music".
+ -
+ - There is a (currently very basic) interface that should make it easy to control and play
+ - along with. This will hopefully at some point be extended to provide more history via
+ - undoing mutations and recalling past Pieces (even from some kind of persistence). How to 
+ - make this actually simple is still a problem, perhaps it should be based off of ratings
+ - aka myself as a fitness function and some kind of basic searchability.
+ -
+ - Behind the interface there is the generation of Pieces which are my intermediate
+ - representation. It is on this level that random seeds and weights which effect the composition
+ - are stored and this should suffice to be persisted.
+ -
+ - Pieces can be mutated via random change in order to change songs. In general the goal is
+ - that some kind of consistency should continue to exist in songs. This means extending 
+ - the amount of weights and how the seeds to work, since just changing a fundamental seed
+ - would totally change everything. At the same time large and unexpected changes are part of 
+ - the fun and the point.
+ -
+ - There is also some potential that one could have "guided mutations" where for example 
+ - things could be made more "intense" rather then randomly more or less intense by plugging
+ - in a random gen that only produces positive values. This could be controlled by interface
+ - extensions to allow "conducting" like behavior.
+ -
+ - From here it is passed to the very nice Euterpea which will generate music. Even here there are
+ - options of what to do since Euterpea can handle phrasing concerns and change music on its level.
+ -
+ - From there it goes out to a synth, either on my computer or my drum synth and from there into
+ - effect pedals or what have you.
+ -
+ - This is also an attempt to learn Haskell and to simply do some programming the way I like it.
+ - Programming to make a tool for a person to do something, rather then for its own output.
+ -}
+
 main :: IO ()
 main = do
     hSetBuffering stdin NoBuffering -- to respond immediately to input
     (sendToPlayer, stop) <- spawnPlaybackChannel -- all instructions take effect after the current measure
-    let act :: Maybe (Piece) -> IO ()
-        act mEx = do --mEx is Maybe (the existing piece) if there is one playing
-            let atomicPlay = sendToPlayer . loadPiece . traceShowId
+    let act :: [Piece] -> IO ()
+        act history = do
+            let play = sendToPlayer . loadPiece . traceShowId
             c <- getChar
             case c of 'n' -> do -- generate a new piece
                               stdGen <- newStdGen
                               let piece = createPiece stdGen
-                              atomicPlay piece
-                              act $ Just(piece)
+                              play piece
+                              act (piece:history)
                       's' -> do -- stop playing music
                               stop
-                              act Nothing
+                              act history
                       'm' -> do -- perform a random mutation of the playing track
-                              case mEx of Nothing -> act Nothing
-                                          Just existing -> do
-                                                            stdGen <- newStdGen
-                                                            let piece = mutate stdGen existing
-                                                            atomicPlay piece
-                                                            act $ Just(piece)
-                      _   -> act mEx -- default case do nothing
-    act Nothing
+                              if length history > 0 then do
+                                                          stdGen <- newStdGen
+                                                          let piece = mutate stdGen $ head history
+                                                          play piece
+                                                          act (piece:history)
+                                                    else act history
+                      'b' -> do -- go back one step
+                              if length history > 1 then do
+                                                          let (_:x:xs) = history
+                                                          play x
+                                                          act (x:xs)
+                                                    else act history
+                      _   -> act history -- default case do nothing
+    act []
 
 {-
  - The Constructors Used By All The Parts Of This System
@@ -92,9 +136,8 @@ createPiece g = fst $ runState (do
         gen <- get
         return Piece {seed=seed,
                       beats=4,
-                      parts=[createPart instruments gen]
-                     }
-        ) g
+                      parts=[createPart instruments gen]}
+      ) g
     where r = state random
           rR = state . randomR
           rRs i r = state $ randomRs' i r
@@ -110,8 +153,7 @@ createPart insts gen =
     let (val, nextGen) = random gen
     in Part { pSeed=val,
               repeats=2, -- temporary fixed value
-              tracks=createTracks insts nextGen
-            }
+              tracks=createTracks insts nextGen}
 
 createTracks :: RandomGen g => [Int] -> g -> [Track]
 createTracks [] _ = []
@@ -123,7 +165,7 @@ createTracks (i:is) gen =
 createTrack :: Int -> Int -> Track
 createTrack inst seed = Track {tSeed=seed,
                                inst=inst,
-                               playWeight=0} -- remporary fixed value
+                               playWeight=0} -- temporary fixed value
 {- Mutation station
  -}
 -- take a random gen and return a mutator with a split off random gen applied to it
@@ -132,7 +174,8 @@ mutate gen =
     let mutators = [
           addPart,
           removePart,
-          addTrack]
+          addTrack,
+          modifyRepeats]
         (index, nextGen) = randomR (0, (length mutators) - 1) gen
     in  (mutators!!index) nextGen
 
@@ -161,15 +204,17 @@ addTrack g p = -- adds the same track to each part changed
         adder _ pa = pa{tracks=nTrack:(tracks pa)}
     in  whichParts nexterG p adder
 
--- removeSomeTracks :: RandomGen g => g -> Piece -> Piece
--- removeSomeTracks g p =
---     let remove g pa = pa{tracks=}
---     in  whichParts g p remover
+modifyRepeats :: RandomGen g => g -> Piece -> Piece
+modifyRepeats g p =
+    let factor = fst $ randomR (1,2) g :: Int
+    in  whichParts g p $ (\ g pa -> pa{repeats=(repeats pa) * 2^factor})
 
-{- Mutator utils
+{- M(util)ators
+ -
+ - utils for mutatin'
  -}
 whichParts :: RandomGen g => g -> Piece -> (g -> Part -> Part) -> Piece
-whichParts g = 
+whichParts g = -- probably should balance the "All" against the number of items in the list
     let options = [
           mutateAllParts,
           mutateRandomPart]
@@ -202,22 +247,22 @@ mutateRandomInList g as f =
  -
  - Euterpea handles converting a Piece into MIDI data and hopefully some of its tempo
  - changing, etc. abilities can also be used here.
+ -
+ - For example the phrase function can be used like `phrase [Dyn $ Accent 0.5]` to make a note
+ - half intensity. This could be combined in different patterns (every other, or per measure, etc.)
  -}
-loadPiece :: Piece -> Music (Pitch)
-loadPiece (Piece s b p) = line $ foldl (++) [] $ map (partToMeasures b) p -- may need to make infinite lists to match tracks up
+loadPiece :: Piece -> Music (Pitch) -- this Music (Pitch) should be at the top level a "line" of measures
+loadPiece (Piece s b p) = line $ foldl (++) [] $ map (partToMeasures b) p
 
 partToMeasures :: Int -> Part -> [Music (Pitch)]
 partToMeasures b pa = take (repeats pa) $ repeat (chord $ map (trackToMeasure b) (tracks pa))
 
 trackToMeasure :: Int -> Track -> Music (Pitch)
 trackToMeasure b Track{tSeed=s, inst=i, playWeight=w} =
-    let inst = instrumentToPerc i
+    let inst = perc (toEnum i::PercussionSound) qn --hard coded for now
         chooser n = if (n + w) > 50 then inst else rest qn -- hard coded for now
         randomChanceList = randomRs (1, 100) (mkStdGen s) :: [Int]
-    in line $ map chooser $ take b randomChanceList
-
-instrumentToPerc :: Int -> Music (Pitch)
-instrumentToPerc i = perc (toEnum i::PercussionSound) qn --hard coded for now
+    in  line $ map chooser $ take b randomChanceList
 
 {--
  - Utility functions for overall system
