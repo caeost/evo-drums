@@ -12,7 +12,8 @@ import Control.Concurrent.STM
 
 import Debug.Trace
 
-{- Evo-Drums
+{--
+ - Evo-Drums
  -
  - The goal of this is to provide a drummer that I can jam along with.
  -
@@ -79,29 +80,50 @@ main = do
                                                           play x
                                                           act (x:xs)
                                                     else act history
+                      'w' -> writeAction history >> act history
+                      'r' -> readAction >>= act
                       _   -> act history -- default case do nothing
     act []
 
-{-
+writeAction :: [Piece] -> IO ()
+writeAction history = do
+    let save hs = do
+                    s <- getLine
+                    saveToFile s hs
+
+    c <- getChar
+    case c of 'a' -> do -- save all of current history
+                      save history
+              's' -> do -- save current single Piece
+                      save [head history]
+
+readAction :: IO [Piece]
+readAction = do
+    filename <- getLine
+    contents <- readFile filename
+    return $ map (\ p -> (read p) :: Piece) $ filter (\ a -> length a > 0) $ lines contents
+
+{--
  - The Constructors Used By All The Parts Of This System
  - (one to create, one to output to the next stage)
  -
  - The Piece is random weights and settings from which a consistent set of music will be
  - generated. it represents the composition and provides controls to alter compositions.
  -}
-data Piece = Piece { seed   :: Int,
-                     beats   :: Int,
-                     parts :: [Part]
+data Piece = Piece { seed   :: Int, -- the initial random seed used to generate the Piece
+                     beats   :: Int, -- how many beats per measure in the Piece
+                     parts :: [Part] -- sequential ordered segments of the Piece
                    } deriving (Show, Read, Eq)
 
-data Part = Part { pSeed   :: Int,
-                   repeats :: Int,
-                   tracks :: [Track]
+data Part = Part { pSeed   :: Int, -- seed used to generate the initial Part
+                   repeats :: Int, -- how many times to repeat this part for within the piece
+                   tracks :: [Track] -- different instruments that play simultaneously for this part
                  } deriving (Show, Read, Eq)
 
-data Track = Track  { tSeed :: Int,
-                      inst :: Int,
-                      playWeight :: Int
+data Track = Track  { tSeed :: Int, -- seed used to generate notes for this track
+                      inst :: Int, -- the instrument used by this track
+                      playWeight :: Int, -- adjusted to make the track more/less likely to play
+                      durCenterWeight :: Int -- adjusted to make the track tend towards long/short durations
                     } deriving (Show, Read, Eq)
 
 {--
@@ -165,8 +187,10 @@ createTracks (i:is) gen =
 createTrack :: Int -> Int -> Track
 createTrack inst seed = Track {tSeed=seed,
                                inst=inst,
-                               playWeight=0} -- temporary fixed value
-{- Mutation station
+                               playWeight=0, -- temporary fixed value
+                               durCenterWeight=0} -- temporary fixed value
+{--
+ - Mutation station
  -}
 -- take a random gen and return a mutator with a split off random gen applied to it
 mutate :: RandomGen g => g -> Piece -> Piece
@@ -209,7 +233,8 @@ modifyRepeats g p =
     let factor = fst $ randomR (1,2) g :: Int
     in  whichParts g p $ (\ g pa -> pa{repeats=(repeats pa) * 2^factor})
 
-{- M(util)ators
+{--
+ - M(util)ators
  -
  - utils for mutatin'
  -}
@@ -300,4 +325,8 @@ spawnPlaybackChannel = do
     forkIO work
 
     return (write . Just, stop)
+
+saveToFile :: String -> [Piece] -> IO ()
+saveToFile filename pieces =
+    writeFile filename $ unlines $ map show pieces -- or appendFile ????
 
