@@ -1,9 +1,7 @@
 module Main where
 
-import Euterpea
-import Data.List as List
-import Control.Monad.State (State, state, runState, get)
-import Control.Monad (forever, when)
+import Euterpea hiding (a,as,b,bs,c,cs,d,ds,e,es,f,fs,g,gs, left, right)
+import Control.Monad.State (state, runState, get)
 import System.Random
 import System.IO
 import Control.Concurrent
@@ -57,12 +55,12 @@ main = do
     (sendToPlayer, stop) <- spawnPlaybackChannel -- all instructions take effect after the current measure
     let act :: [Piece] -> IO ()
         act history = do
-            let play = sendToPlayer . loadPiece . traceShowId
+            let queuePlay = sendToPlayer . loadPiece . traceShowId
             c <- getChar
             case c of 'n' -> do -- generate a new piece
                               stdGen <- newStdGen
                               let piece = createPiece stdGen
-                              play piece
+                              queuePlay piece
                               act (piece:history)
                       's' -> do -- stop playing music
                               stop
@@ -71,13 +69,13 @@ main = do
                               if length history > 0 then do
                                                           stdGen <- newStdGen
                                                           let piece = mutate stdGen $ head history
-                                                          play piece
+                                                          queuePlay piece
                                                           act (piece:history)
                                                     else act history
                       'b' -> do -- go back one step
                               if length history > 1 then do
                                                           let (_:x:xs) = history
-                                                          play x
+                                                          queuePlay x
                                                           act (x:xs)
                                                     else act history
                       'w' -> writeAction history >> act history
@@ -96,6 +94,7 @@ writeAction history = do
                       save history
               's' -> do -- save current single Piece
                       save [head history]
+              _   -> return ()
 
 readAction :: IO [Piece]
 readAction = do
@@ -147,22 +146,23 @@ data Track = Track  { tSeed :: Int, -- seed used to generate notes for this trac
  - There is also potential for more targeted manipulation later if desired. Being able to
  - directly boost a certain instrument's threshold to hear it less frequently for example.
  -}
+percussionRange :: (Int, Int)
 percussionRange = (0, 46) -- 47 percussion instruments are defined in Euterpea
 
 createPiece :: RandomGen g => g -> Piece
 createPiece g = fst $ runState (do
-        seed <- r
-        instCount <- rR (1, 10) -- hard coded for now
-        instruments <- rRs instCount percussionRange
+        s <- ra
+        instCount <- raR (1, 10) -- hard coded for now
+        instruments <- raRs instCount percussionRange
 
         gen <- get
-        return Piece {seed=seed,
+        return Piece {seed=s,
                       beats=4,
                       parts=[createPart instruments gen]}
       ) g
-    where r = state random
-          rR = state . randomR
-          rRs i r = state $ randomRs' i r
+    where ra = state random
+          raR = state . randomR
+          raRs i r = state $ randomRs' i r
 
 randoms' :: (RandomGen g, Random a) => Int -> g -> ([a], g)
 randoms' i g = ((take i $ randoms g), fst $ split g)
@@ -181,14 +181,14 @@ createTracks :: RandomGen g => [Int] -> g -> [Track]
 createTracks [] _ = []
 createTracks (i:is) gen =
     let (val, nextGen) = random gen
-        seq = createTrack i val
-    in seq : createTracks is nextGen
+        s = createTrack i val
+    in s : createTracks is nextGen
 
 createTrack :: Int -> Int -> Track
-createTrack inst seed = Track {tSeed=seed,
-                               inst=inst,
-                               playWeight=0, -- temporary fixed value
-                               durCenterWeight=0} -- temporary fixed value
+createTrack i s = Track {tSeed=s,
+                         inst=i,
+                         playWeight=0, -- temporary fixed value
+                         durCenterWeight=0} -- temporary fixed value
 {--
  - Mutation station
  -}
@@ -222,50 +222,71 @@ removePart g p =
 
 addTrack :: RandomGen g => g -> Piece -> Piece
 addTrack g p = -- adds the same track to each part changed
-    let (inst, nextG) = randomR percussionRange g -- should probably check for collision
-        (seed, nexterG) = random nextG
-        nTrack = createTrack inst seed
+    let (i, nextG) = randomR percussionRange g -- should probably check for collision
+        (s, nexterG) = random nextG
+        nTrack = createTrack i s
         adder _ pa = pa{tracks=nTrack:(tracks pa)}
-    in  whichParts nexterG p adder
+    in  whichParts adder nexterG p
 
 modifyRepeats :: RandomGen g => g -> Piece -> Piece
 modifyRepeats g p =
-    let factor = fst $ randomR (1,2) g :: Int
-    in  whichParts g p $ (\ g pa -> pa{repeats=(repeats pa) * 2^factor})
+    let (factor, ng) = randomR (1,2) g
+    in  whichParts (\ _ pa -> pa{repeats=(repeats pa) * 2^(factor::Int)}) ng p
+
+modifyPlayWeights :: RandomGen gen => gen -> Piece -> Piece
+modifyPlayWeights gen p =
+    let rand g = fst $ randomR (-1000, 1000) g
+        weighter g = round $ (rand g :: Double) / 100 -- swings by at most +-10
+        mutator g t = t{playWeight=(playWeight t) + (weighter g::Int)}
+    in  whichParts (whichTracks mutator) gen p
 
 {--
  - M(util)ators
  -
  - utils for mutatin'
  -}
-whichParts :: RandomGen g => g -> Piece -> (g -> Part -> Part) -> Piece
-whichParts g = -- probably should balance the "All" against the number of items in the list
+whichParts :: RandomGen g => (g -> Part -> Part) -> g -> Piece -> Piece
+whichParts t g p = -- probably should balance the "All" against the number of items in the list
     let options = [
           mutateAllParts,
           mutateRandomPart]
         (index, nextG) = randomR (0, (length options) - 1) g
-    in  (options!!index) nextG
+    in  (options!!index) t nextG p
 
-mutateAllParts :: RandomGen g => g -> Piece -> (g -> Part -> Part) -> Piece
-mutateAllParts   g p t = p{parts=mutateAllInList g (parts p) t}
+mutateAllParts :: RandomGen g => (g -> Part -> Part) -> g -> Piece -> Piece
+mutateAllParts   t g p = p{parts=mutateAllInList g (parts p) t}
 
-mutateRandomPart :: RandomGen g => g -> Piece -> (g -> Part -> Part) -> Piece
-mutateRandomPart g p t = p{parts=mutateRandomInList g (parts p) t}
+mutateRandomPart :: RandomGen gen => (gen -> Part -> Part) -> gen -> Piece -> Piece
+mutateRandomPart t gen p = p{parts=mutateRandomInList gen (parts p) t}
 
-mutateAllInList :: RandomGen g => g -> [a] -> (g -> a -> a) -> [a]
-mutateAllInList g as f =
-    let mutater g t [] = []
-        mutater g t (a:as) =
+whichTracks :: RandomGen gen => (gen -> Track -> Track) -> gen -> Part -> Part
+whichTracks t gen pa = -- probably should balance the "All" against the number of items in the list
+    let options = [
+          mutateAllTracks,
+          mutateRandomTrack]
+        (index, nextG) = randomR (0, (length options) - 1) gen
+    in  (options!!index) t nextG pa
+
+mutateAllTracks :: RandomGen gen => (gen -> Track -> Track) -> gen -> Part -> Part
+mutateAllTracks t gen pa = pa{tracks=mutateAllInList gen (tracks pa) t}
+
+mutateRandomTrack :: RandomGen gen => (gen -> Track -> Track) -> gen -> Part -> Part
+mutateRandomTrack t gen pa = pa{tracks=mutateRandomInList gen (tracks pa) t}
+
+mutateAllInList :: RandomGen gen => gen -> [a] -> (gen -> a -> a) -> [a]
+mutateAllInList gen list f =
+    let mutater _ _ [] = []
+        mutater g t (x:xs) =
             let (_, ng) = next g
-            in  t ng a : mutater ng t as
-    in  mutater g f as
+            in  t ng x : mutater ng t xs
+    in  mutater gen f list
 
-mutateRandomInList :: RandomGen g => g -> [a] -> (g -> a -> a) -> [a]
-mutateRandomInList g as f =
-    let (val, nextGen) = randomR (0, (length as) - 1) g
+mutateRandomInList :: RandomGen gen => gen -> [a] -> (gen -> a -> a) -> [a]
+mutateRandomInList gen list f =
+    let (val, nextGen) = randomR (0, (length list) - 1) gen
         mutater _ _ [] = []
-        mutater f i (a:as) = (if i == 0 then f a else a):(mutater f (i - 1) as)
-    in  mutater (f nextGen) val as
+        mutater t i (x:xs) = (if i == 0 then t x else x):(mutater t (i - 1) xs)
+    in  mutater (f nextGen) val list
 
 {--
  - Turning a Piece into a Euterpea Music object to be played
@@ -277,15 +298,15 @@ mutateRandomInList g as f =
  - half intensity. This could be combined in different patterns (every other, or per measure, etc.)
  -}
 loadPiece :: Piece -> Music (Pitch) -- this Music (Pitch) should be at the top level a "line" of measures
-loadPiece (Piece s b p) = line $ foldl (++) [] $ map (partToMeasures b) p
+loadPiece (Piece _ b p) = line $ foldl (++) [] $ map (partToMeasures b) p
 
 partToMeasures :: Int -> Part -> [Music (Pitch)]
 partToMeasures b pa = take (repeats pa) $ repeat (chord $ map (trackToMeasure b) (tracks pa))
 
 trackToMeasure :: Int -> Track -> Music (Pitch)
 trackToMeasure b Track{tSeed=s, inst=i, playWeight=w} =
-    let inst = perc (toEnum i::PercussionSound) qn --hard coded for now
-        chooser n = if (n + w) > 50 then inst else rest qn -- hard coded for now
+    let iNote = perc (toEnum i::PercussionSound) qn --hard coded for now
+        chooser n = if (n + w) > 50 then iNote else rest qn -- hard coded for now
         randomChanceList = randomRs (1, 100) (mkStdGen s) :: [Int]
     in  line $ map chooser $ take b randomChanceList
 
@@ -304,9 +325,9 @@ spawnPlaybackChannel = do
                                   then putTMVar workVar j
                                   else swapTMVar workVar j >> return ())
         stop    = write Nothing
-        die e   = do
-                   id <- myThreadId
-                   print ("Playback Thread " ++ show id ++ " died with exception " ++ show (e :: ErrorCall))
+        die err   = do
+                   tid <- myThreadId
+                   print ("Playback Thread " ++ show tid ++ " died with exception " ++ show (err :: ErrorCall))
                    stop
         pieceWork :: [Music Pitch] -> IO ()
         pieceWork [] = work
@@ -322,7 +343,7 @@ spawnPlaybackChannel = do
                    case mJob of Nothing -> work -- waiting on a new job
                                 Just music -> pieceWork $ lineToList music
 
-    forkIO work
+    _ <- forkIO work
 
     return (write . Just, stop)
 
