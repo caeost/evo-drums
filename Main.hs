@@ -7,6 +7,7 @@ import System.IO
 import Control.Concurrent
 import Control.Exception as E
 import Control.Concurrent.STM
+import Data.Ratio
 
 import Debug.Trace
 
@@ -79,7 +80,12 @@ main = do
                                                           act (x:xs)
                                                     else act history
                       'w' -> writeAction history >> act history
-                      'r' -> readAction >>= act
+                      'r' -> do
+                              h <- readAction
+                              queuePlay (head h)
+                              act h
+                      'u' -> act history -- up vote for current piece
+                      'd' -> act history -- down vote for current piece
                       _   -> act history -- default case do nothing
     act []
 
@@ -199,7 +205,8 @@ mutate gen =
           addPart,
           removePart,
           addTrack,
-          modifyRepeats]
+          modifyRepeats,
+          modifyPlayWeights]
         (index, nextGen) = randomR (0, (length mutators) - 1) gen
     in  (mutators!!index) nextGen
 
@@ -237,7 +244,7 @@ modifyPlayWeights :: RandomGen gen => gen -> Piece -> Piece
 modifyPlayWeights gen p =
     let rand g = fst $ randomR (-1000, 1000) g
         weighter g = round $ (rand g :: Double) / 100 -- swings by at most +-10
-        mutator g t = t{playWeight=(playWeight t) + (weighter g::Int)}
+        mutator g t = t{playWeight=(playWeight t) + (weighter g)}
     in  whichParts (whichTracks mutator) gen p
 
 {--
@@ -254,36 +261,34 @@ whichParts t g p = -- probably should balance the "All" against the number of it
     in  (options!!index) t nextG p
 
 mutateAllParts :: RandomGen g => (g -> Part -> Part) -> g -> Piece -> Piece
-mutateAllParts   t g p = p{parts=mutateAllInList g (parts p) t}
+mutateAllParts   f g p = p{parts=mutateAllInList f g (parts p)}
 
-mutateRandomPart :: RandomGen gen => (gen -> Part -> Part) -> gen -> Piece -> Piece
-mutateRandomPart t gen p = p{parts=mutateRandomInList gen (parts p) t}
+mutateRandomPart :: RandomGen g => (g -> Part -> Part) -> g -> Piece -> Piece
+mutateRandomPart f g p = p{parts=mutateRandomInList f g (parts p)}
 
-whichTracks :: RandomGen gen => (gen -> Track -> Track) -> gen -> Part -> Part
-whichTracks t gen pa = -- probably should balance the "All" against the number of items in the list
+whichTracks :: RandomGen g => (g -> Track -> Track) -> g -> Part -> Part
+whichTracks t g pa = -- probably should balance the "All" against the number of items in the list
     let options = [
           mutateAllTracks,
           mutateRandomTrack]
-        (index, nextG) = randomR (0, (length options) - 1) gen
+        (index, nextG) = randomR (0, (length options) - 1) g
     in  (options!!index) t nextG pa
 
-mutateAllTracks :: RandomGen gen => (gen -> Track -> Track) -> gen -> Part -> Part
-mutateAllTracks t gen pa = pa{tracks=mutateAllInList gen (tracks pa) t}
+mutateAllTracks :: RandomGen g => (g -> Track -> Track) -> g -> Part -> Part
+mutateAllTracks f g pa = pa{tracks=mutateAllInList f g (tracks pa)}
 
-mutateRandomTrack :: RandomGen gen => (gen -> Track -> Track) -> gen -> Part -> Part
-mutateRandomTrack t gen pa = pa{tracks=mutateRandomInList gen (tracks pa) t}
+mutateRandomTrack :: RandomGen g => (g -> Track -> Track) -> g -> Part -> Part
+mutateRandomTrack f g pa = pa{tracks=mutateRandomInList f g (tracks pa)}
 
-mutateAllInList :: RandomGen gen => gen -> [a] -> (gen -> a -> a) -> [a]
-mutateAllInList gen list f =
-    let mutater _ _ [] = []
-        mutater g t (x:xs) =
-            let (_, ng) = next g
-            in  t ng x : mutater ng t xs
-    in  mutater gen f list
+mutateAllInList :: RandomGen g => (g -> a -> a) -> g -> [a] -> [a]
+mutateAllInList _ _ [] = []
+mutateAllInList f g (x:xs) =
+    let (_, ng) = next g
+    in  f ng x : mutateAllInList f ng xs
 
-mutateRandomInList :: RandomGen gen => gen -> [a] -> (gen -> a -> a) -> [a]
-mutateRandomInList gen list f =
-    let (val, nextGen) = randomR (0, (length list) - 1) gen
+mutateRandomInList :: RandomGen g => (g -> a -> a) -> g -> [a] -> [a]
+mutateRandomInList f g list =
+    let (val, nextGen) = randomR (0, (length list) - 1) g
         mutater _ _ [] = []
         mutater t i (x:xs) = (if i == 0 then t x else x):(mutater t (i - 1) xs)
     in  mutater (f nextGen) val list
@@ -304,11 +309,30 @@ partToMeasures :: Int -> Part -> [Music (Pitch)]
 partToMeasures b pa = take (repeats pa) $ repeat (chord $ map (trackToMeasure b) (tracks pa))
 
 trackToMeasure :: Int -> Track -> Music (Pitch)
-trackToMeasure b Track{tSeed=s, inst=i, playWeight=w} =
-    let iNote = perc (toEnum i::PercussionSound) qn --hard coded for now
-        chooser n = if (n + w) > 50 then iNote else rest qn -- hard coded for now
-        randomChanceList = randomRs (1, 100) (mkStdGen s) :: [Int]
-    in  line $ map chooser $ take b randomChanceList
+trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, durCenterWeight=dw} =
+    let randomBounds = (1,100)
+        sound = perc (toEnum i::PercussionSound)
+        durations = [sn,en,qn,hn,wn] -- supporting sixteenth to whole notes, no dots
+        randomChanceList = randomRs randomBounds (mkStdGen s) :: [Int]
+        playThreshold =
+            let f = (fst randomBounds) - 1
+                s = (snd randomBounds) - 1
+            in  min f $ max s (round ((s - f) % 2) + pw)
+
+        noteOrRest r = if r > playThreshold then sound else rest
+
+        durator rem r =
+            let candidates = filter (\n -> n <= rem) durations -- or do modulu method
+                percent = (toRational $ r + dw) / (toRational $ (snd randomBounds) % (length candidates))
+            in  candidates!!(min ((length candidates) - 1) $ max 0 (round percent))
+
+        consume _ []    = []
+        consume space (r1:r2:rs)
+            | space > 0 =
+                   let dur = durator space r1
+                   in  (noteOrRest r2) dur : consume (space - dur) rs
+            | otherwise = []
+    in  line $ consume (toRational $ b % 4) randomChanceList
 
 {--
  - Utility functions for overall system
