@@ -1,7 +1,7 @@
 module Main where
 
 import Euterpea hiding (a,as,b,bs,c,cs,d,ds,e,es,f,fs,g,gs, left, right)
-import Control.Monad.State (state, runState, get)
+import Control.Monad.State (state, runState)
 import System.Random
 import System.IO
 import Control.Concurrent
@@ -324,18 +324,15 @@ partToMeasures b pa = take (repeats pa) $ repeat (chord $ map (trackToMeasure b)
 
 trackToMeasure :: Int -> Track -> Music (Pitch)
 trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDurWeight=rw} =
-    let randomBounds = (1,100)
+    let randomBounds@(lower,higher) = (1,100)
         sound = perc (toEnum i::PercussionSound)
-        durations = [sn,en,qn,hn,wn] -- supporting sixteenth to whole notes, no dots
-        randomChanceList = randomRs randomBounds (mkStdGen s)
-        playThreshold =
-            let lower = (fst randomBounds) - 1
-                higher = (snd randomBounds) - 1
-            in  min lower $ max higher (round ((higher - lower) % 2) + pw)
+        durs = [sn,en,qn,hn,wn] -- supporting sixteenth to whole notes, no dots
+        randomList = randomRs randomBounds (mkStdGen s)
+        playThreshold = min (lower-1) $ max (higher-1) (round ((higher - lower) % 2) + pw)
 
         durator space weight r =
-            let candidates = filter (\n -> (denominator $ space / n) == 1) durations
-                percent = (toRational $ r + weight) / (toRational $ (snd randomBounds) % (length candidates))
+            let candidates = filter (\n -> (denominator $ space / n) == 1) durs
+                percent = (toRational $ r + weight) / (toRational $ (higher-lower) % (length candidates))
             in  candidates!!(min ((length candidates) - 1) $ max 0 (round percent))
 
         consume _ []    = []
@@ -347,12 +344,14 @@ trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDur
                        d = durator space (if isNote then nw else rw) r2
                    in  event d : consume (space - d) rs
             | otherwise = []
-    in  line $ consume (toRational $ b % 4) randomChanceList
+    in  line $ consume (toRational $ b % 4) randomList
 
 {--
  - Utility functions for overall system
  -}
 
+pp :: PlayParams
+pp = defParams{closeDelay=0} -- may need to tune this but it is better then the 1 second delay
 -- based off of https://wiki.haskell.org/Background_thread_example
 spawnPlaybackChannel :: IO (Music Pitch -> IO (), IO ())
 spawnPlaybackChannel = do
@@ -373,7 +372,7 @@ spawnPlaybackChannel = do
         pieceWork (x:xs) = do
                    noNewMessage <- atomically(isEmptyTMVar workVar) -- peek at the state
                    if noNewMessage then do
-                                             play x
+                                             playC pp x
                                              pieceWork (xs ++ [x])
                                    else work
         work :: IO ()
