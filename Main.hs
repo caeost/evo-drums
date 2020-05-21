@@ -8,6 +8,7 @@ import Control.Concurrent
 import Control.Exception as E
 import Control.Concurrent.STM
 import Data.Ratio
+import Data.List (isPrefixOf)
 
 import Debug.Trace
 
@@ -106,7 +107,7 @@ readAction :: IO [Piece]
 readAction = do
     filename <- getLine
     contents <- readFile filename
-    return $ map (\ p -> (read p) :: Piece) $ filter (\ a -> length a > 0) $ lines contents
+    return $ map (\ p -> (read p) :: Piece) $ filter (isPrefixOf "Piece {") $ lines contents
 
 {--
  - The Constructors Used By All The Parts Of This System
@@ -127,8 +128,9 @@ data Part = Part { pSeed   :: Int, -- seed used to generate the initial Part
 
 data Track = Track  { tSeed :: Int, -- seed used to generate notes for this track
                       inst :: Int, -- the instrument used by this track
-                      playWeight :: Int, -- adjusted to make the track more/less likely to play
-                      durCenterWeight :: Int -- adjusted to make the track tend towards long/short durations
+                      playWeight :: Int, -- make the track more/less likely to play notes
+                      noteDurWeight :: Int, -- make the track tend towards long/short notes
+                      restDurWeight :: Int -- make the track tend towards long/short rests
                     } deriving (Show, Read, Eq)
 
 {--
@@ -161,13 +163,15 @@ createPiece g = fst $ runState (do
         instCount <- raR (1, 10) -- hard coded for now
         instruments <- raRs instCount percussionRange
 
-        gen <- get
+        partCount <- raR (1,4) -- hard coded for now
+        partSeeds <- ras partCount
         return Piece {seed=s,
                       beats=4,
-                      parts=[createPart instruments gen]}
+                      parts=map ((createPart instruments) . mkStdGen) partSeeds}
       ) g
     where ra = state random
           raR = state . randomR
+          ras = state . randoms'
           raRs i r = state $ randomRs' i r
 
 randoms' :: (RandomGen g, Random a) => Int -> g -> ([a], g)
@@ -194,7 +198,8 @@ createTrack :: Int -> Int -> Track
 createTrack i s = Track {tSeed=s,
                          inst=i,
                          playWeight=0, -- temporary fixed value
-                         durCenterWeight=0} -- temporary fixed value
+                         noteDurWeight=0, -- temporary fixed value
+                         restDurWeight=0} -- temporary fixed value
 {--
  - Mutation station
  -}
@@ -206,7 +211,9 @@ mutate gen =
           removePart,
           addTrack,
           modifyRepeats,
-          modifyPlayWeights]
+          modifyPlayWeights,
+          modifyNoteDuration,
+          modifyRestDuration]
         (index, nextGen) = randomR (0, (length mutators) - 1) gen
     in  (mutators!!index) nextGen
 
@@ -240,18 +247,25 @@ modifyRepeats g p =
     let (factor, ng) = randomR (1,2) g
     in  whichParts (\ _ pa -> pa{repeats=(repeats pa) * 2^(factor::Int)}) ng p
 
-modifyPlayWeights :: RandomGen gen => gen -> Piece -> Piece
-modifyPlayWeights gen p =
-    let rand g = fst $ randomR (-1000, 1000) g
-        weighter g = round $ (rand g :: Double) / 100 -- swings by at most +-10
-        mutator g t = t{playWeight=(playWeight t) + (weighter g)}
-    in  whichParts (whichTracks mutator) gen p
+modifyPlayWeights :: RandomGen g => g -> Piece -> Piece
+modifyPlayWeights = whichParts (whichTracks (\g t -> t{playWeight=(playWeight t) + (weighter g)}))
+
+modifyNoteDuration :: RandomGen gen => gen -> Piece -> Piece
+modifyNoteDuration = whichParts (whichTracks (\g t -> t{noteDurWeight=(noteDurWeight t) + (weighter g)}))
+
+modifyRestDuration :: RandomGen gen => gen -> Piece -> Piece
+modifyRestDuration = whichParts (whichTracks (\g t -> t{restDurWeight=(restDurWeight t) + (weighter g)}))
 
 {--
  - M(util)ators
  -
  - utils for mutatin'
  -}
+weighter :: RandomGen g => g -> Int -- swings by at most +-10
+weighter g =
+    let (out, _)= randomR (-1000, 1000) g
+    in  round $ (out :: Int) % 100
+
 whichParts :: RandomGen g => (g -> Part -> Part) -> g -> Piece -> Piece
 whichParts t g p = -- probably should balance the "All" against the number of items in the list
     let options = [
@@ -309,28 +323,29 @@ partToMeasures :: Int -> Part -> [Music (Pitch)]
 partToMeasures b pa = take (repeats pa) $ repeat (chord $ map (trackToMeasure b) (tracks pa))
 
 trackToMeasure :: Int -> Track -> Music (Pitch)
-trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, durCenterWeight=dw} =
+trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDurWeight=rw} =
     let randomBounds = (1,100)
         sound = perc (toEnum i::PercussionSound)
         durations = [sn,en,qn,hn,wn] -- supporting sixteenth to whole notes, no dots
-        randomChanceList = randomRs randomBounds (mkStdGen s) :: [Int]
+        randomChanceList = randomRs randomBounds (mkStdGen s)
         playThreshold =
-            let f = (fst randomBounds) - 1
-                s = (snd randomBounds) - 1
-            in  min f $ max s (round ((s - f) % 2) + pw)
+            let lower = (fst randomBounds) - 1
+                higher = (snd randomBounds) - 1
+            in  min lower $ max higher (round ((higher - lower) % 2) + pw)
 
-        noteOrRest r = if r > playThreshold then sound else rest
-
-        durator rem r =
-            let candidates = filter (\n -> n <= rem) durations -- or do modulu method
-                percent = (toRational $ r + dw) / (toRational $ (snd randomBounds) % (length candidates))
+        durator space weight r =
+            let candidates = filter (\n -> (denominator $ space / n) == 1) durations
+                percent = (toRational $ r + weight) / (toRational $ (snd randomBounds) % (length candidates))
             in  candidates!!(min ((length candidates) - 1) $ max 0 (round percent))
 
         consume _ []    = []
+        consume _ [_]   = []
         consume space (r1:r2:rs)
             | space > 0 =
-                   let dur = durator space r1
-                   in  (noteOrRest r2) dur : consume (space - dur) rs
+                   let isNote = r1 > playThreshold
+                       event = if isNote then sound else rest 
+                       d = durator space (if isNote then nw else rw) r2
+                   in  event d : consume (space - d) rs
             | otherwise = []
     in  line $ consume (toRational $ b % 4) randomChanceList
 
