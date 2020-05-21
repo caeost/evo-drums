@@ -92,7 +92,8 @@ main = do
                                         _   -> return () -- return to main interface
                               act history
                       'r' -> do -- read file and play (takes more input)
-                              h <- readAction
+                              filename <- getLine
+                              h <- readAction filename
                               queuePlay (head h)
                               act h
                       'u' -> act history -- TODO up vote for current piece
@@ -103,9 +104,8 @@ main = do
     act []
 
 
-readAction :: IO [Piece]
-readAction = do
-    filename <- getLine
+readAction :: String -> IO [Piece]
+readAction filename= do
     contents <- readFile filename
     return $ map (\ p -> (read p) :: Piece) $ filter (isPrefixOf "Piece {") $ lines contents
 
