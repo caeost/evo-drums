@@ -3,7 +3,8 @@
 cat Main.hs \
   | awk '/Start Interface/,/End Interface/' \
   | grep '\->\|getLine' \
-  | cut -c 23- \
+  | cut -c 13- \
   | grep -v "TODO" \
   | sed 's/_/other key/' \
+  | sed 's/case c of /input one:/' \
   | sed 's/getLine/Enter characters ending with an enter key/'
