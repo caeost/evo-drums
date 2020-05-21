@@ -1,0 +1,9 @@
+#!/bin/bash
+
+cat Main.hs \
+  | awk '/Start Interface/,/End Interface/' \
+  | grep '\->\|getLine' \
+  | cut -c 23- \
+  | grep -v "TODO" \
+  | sed 's/_/other key/' \
+  | sed 's/getLine/Enter characters ending with an enter key/'

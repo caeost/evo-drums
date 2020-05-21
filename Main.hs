@@ -59,6 +59,7 @@ main = do
         act history = do
             let queuePlay = sendToPlayer . loadPiece . traceShowId
             c <- getChar
+            -- Start Interface
             case c of 'n' -> do -- generate a new piece
                               stdGen <- newStdGen
                               let piece = createPiece stdGen
@@ -80,28 +81,27 @@ main = do
                                                           queuePlay x
                                                           act (x:xs)
                                                     else act history
-                      'w' -> writeAction history >> act history
-                      'r' -> do
+                      'w' -> do -- write songs to file (takes more input)
+                              c <- getChar
+                              case c of 'a' -> do -- save all of current history
+                                                  filename <- getLine
+                                                  saveToFile filename history
+                                        's' -> do -- save current single Piece
+                                                  filename <- getLine
+                                                  saveToFile filename [head history]
+                                        _   -> return () -- return to main interface
+                              act history
+                      'r' -> do -- read file and play (takes more input)
                               h <- readAction
                               queuePlay (head h)
                               act h
-                      'u' -> act history -- up vote for current piece
-                      'd' -> act history -- down vote for current piece
-                      _   -> act history -- default case do nothing
+                      'u' -> act history -- TODO up vote for current piece
+                      'd' -> act history -- TODO down vote for current piece
+                      _   -> do -- nothing, default case
+                              act history
+            -- End Interface
     act []
 
-writeAction :: [Piece] -> IO ()
-writeAction history = do
-    let save hs = do
-                    s <- getLine
-                    saveToFile s hs
-
-    c <- getChar
-    case c of 'a' -> do -- save all of current history
-                      save history
-              's' -> do -- save current single Piece
-                      save [head history]
-              _   -> return ()
 
 readAction :: IO [Piece]
 readAction = do
