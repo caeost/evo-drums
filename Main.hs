@@ -1,6 +1,6 @@
 module Main where
 
-import Euterpea hiding (a,as,b,bs,c,cs,d,ds,e,es,f,fs,g,gs, left, right)
+import Euterpea hiding(a,as,b,bs,c,cs,d,ds,e,es,f,fs,g,gs, left, right)
 import Control.Monad.State (state, runState)
 import System.Random
 import System.IO
@@ -9,6 +9,7 @@ import Control.Exception as E
 import Control.Concurrent.STM
 import Data.Ratio
 import Data.List (isPrefixOf)
+import System.Process
 
 import Debug.Trace
 
@@ -60,7 +61,7 @@ main = do
             let queuePlay = sendToPlayer . loadPiece . traceShowId
             c <- getChar
             -- Start Interface
-            case c of 'n' -> do -- generate a new piece
+            case c of 'n' -> do -- generate and play a new piece
                               stdGen <- newStdGen
                               let piece = createPiece stdGen
                               queuePlay piece
@@ -82,8 +83,8 @@ main = do
                                                           act (x:xs)
                                                     else act history
                       'w' -> do -- write songs to file (takes more input)
-                              c <- getChar
-                              case c of 'a' -> do -- save all of current history
+                              w <- getChar
+                              case w of 'a' -> do -- save all of current history
                                                   filename <- getLine
                                                   saveToFile filename history
                                         's' -> do -- save current single Piece
@@ -115,7 +116,13 @@ readAction filename= do
  -
  - The Piece is random weights and settings from which a consistent set of music will be
  - generated. it represents the composition and provides controls to alter compositions.
+ -
+ - Potentially it would be better to not destructively write to the various weights but
+ - instead to save a list of what operations are applied to them.
  -}
+
+data Ancestry = Ancestry [Int]
+
 data Piece = Piece { seed   :: Int, -- the initial random seed used to generate the Piece
                      beats   :: Int, -- how many beats per measure in the Piece
                      parts :: [Part] -- sequential ordered segments of the Piece
@@ -183,29 +190,52 @@ randomRs' i r g = ((take i $ randomRs r g), fst $ split g)
 createPart :: RandomGen g => [Int] -> g -> Part
 createPart insts gen =
     let (val, nextGen) = random gen
-    in Part { pSeed=val,
-              repeats=2, -- temporary fixed value
-              tracks=createTracks insts nextGen}
+    in  Part { pSeed=val,
+               repeats=2, -- temporary fixed value
+               tracks=createTracks insts nextGen}
 
 createTracks :: RandomGen g => [Int] -> g -> [Track]
 createTracks [] _ = []
 createTracks (i:is) gen =
     let (val, nextGen) = random gen
         s = createTrack i val
-    in s : createTracks is nextGen
+    in  s : createTracks is nextGen
 
 createTrack :: Int -> Int -> Track
-createTrack i s = Track {tSeed=s,
-                         inst=i,
-                         playWeight=0, -- temporary fixed value
-                         noteDurWeight=0, -- temporary fixed value
-                         restDurWeight=0} -- temporary fixed value
+createTrack i s = 
+    let (pw:nw:rw:_) = randomRs (-10, 10) (mkStdGen s)
+    in  Track {tSeed=s,
+               inst=i,
+               playWeight=pw,
+               noteDurWeight=nw,
+               restDurWeight=rw}
+
+{--
+ - Merging Reseaarching~ (pronounciation guide to follow)
+ -
+ - Merging will be some amount of the random space of createPiece seeds  which randomly
+ - finds two seeds and can replay them. If there aren't enough parents in the history
+ - list then the gen should be rerolled until it chooses not to merge and that value
+ - should be saved.
+ -
+ - Steps of mutation should not repeatedly reuse their given RandomGen but should instead
+ - split a gen off of it and use that for their internal processing, while passing
+ - the next generator(s) off to substeps unaffected.
+ -
+ - Potentially a RandomGen could be made that uses a fed in list of numbers up till
+ - a point.
+ -}
 {--
  - Mutation station
+ -
+ - Split off whenever the shape of the Piece or backing data would effect RandomGen generation
+ - If splitting is necessary:
+ - lg = local generator, the generator used within the method to decide things randomly
+ - sg = sub generator, the generator(s) given to whatever sub operations
  -}
 -- take a random gen and return a mutator with a split off random gen applied to it
 mutate :: RandomGen g => g -> Piece -> Piece
-mutate gen =
+mutate g =
     let mutators = [
           addPart,
           removePart,
@@ -214,18 +244,18 @@ mutate gen =
           modifyPlayWeights,
           modifyNoteDuration,
           modifyRestDuration]
-        (index, nextGen) = randomR (0, (length mutators) - 1) gen
-    in  (mutators!!index) nextGen
+        (lg, sg) = split g
+        (index, _) = randomR (0, (length mutators) - 1) lg
+    in  (mutators!!index) sg
 
 addPart :: RandomGen g => g -> Piece -> Piece
 addPart g p =
-    let oldParts = parts p
-        indexToAdd = fst $ randomR (0, (length oldParts) - 1) g
-        (left, right) = splitAt indexToAdd (parts p)
-        insts [] = []
-        insts (t:ts) = (inst t): insts ts
-        newPart = createPart (insts $ tracks $ head oldParts)  g
-    in  p{parts=(left++(newPart:right))}
+    let pas = parts p
+        (lg, sg) = split g
+        newPart = createPart (map inst $ tracks $ head pas) sg -- just one strategy for picking
+        i = fst $ randomR (0, (length pas) - 1) lg
+        (left, right) = splitAt i pas
+    in  p{parts=left++(newPart:right)}
 
 removePart :: RandomGen g => g -> Piece -> Piece
 removePart g p =
@@ -236,24 +266,24 @@ removePart g p =
 
 addTrack :: RandomGen g => g -> Piece -> Piece
 addTrack g p = -- adds the same track to each part changed
-    let (i, nextG) = randomR percussionRange g -- should probably check for collision
-        (s, nexterG) = random nextG
-        nTrack = createTrack i s
+    let (lg, sg) = split g
+        (i, nlg) = randomR percussionRange lg -- should probably check for collision
+        nTrack = createTrack i $ fst $ random nlg
         adder _ pa = pa{tracks=nTrack:(tracks pa)}
-    in  whichParts adder nexterG p
+    in  whichParts adder sg p
 
 modifyRepeats :: RandomGen g => g -> Piece -> Piece
 modifyRepeats g p =
-    let (factor, ng) = randomR (1,2) g
-    in  whichParts (\ _ pa -> pa{repeats=(repeats pa) * 2^(factor::Int)}) ng p
+    let (factor, ng) = randomR (0,3) g
+    in  whichParts (\ _ pa -> pa{repeats=2^(factor::Int)}) ng p
 
 modifyPlayWeights :: RandomGen g => g -> Piece -> Piece
 modifyPlayWeights = whichParts (whichTracks (\g t -> t{playWeight=(playWeight t) + (weighter g)}))
 
-modifyNoteDuration :: RandomGen gen => gen -> Piece -> Piece
+modifyNoteDuration :: RandomGen g => g -> Piece -> Piece
 modifyNoteDuration = whichParts (whichTracks (\g t -> t{noteDurWeight=(noteDurWeight t) + (weighter g)}))
 
-modifyRestDuration :: RandomGen gen => gen -> Piece -> Piece
+modifyRestDuration :: RandomGen g => g -> Piece -> Piece
 modifyRestDuration = whichParts (whichTracks (\g t -> t{restDurWeight=(restDurWeight t) + (weighter g)}))
 
 {--
@@ -271,8 +301,8 @@ whichParts t g p = -- probably should balance the "All" against the number of it
     let options = [
           mutateAllParts,
           mutateRandomPart]
-        (index, nextG) = randomR (0, (length options) - 1) g
-    in  (options!!index) t nextG p
+        (index, sg) = randomR (0, (length options) - 1) g
+    in  (options!!index) t sg p
 
 mutateAllParts :: RandomGen g => (g -> Part -> Part) -> g -> Piece -> Piece
 mutateAllParts   f g p = p{parts=mutateAllInList f g (parts p)}
@@ -352,6 +382,7 @@ trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDur
 
 pp :: PlayParams
 pp = defParams{closeDelay=0} -- may need to tune this but it is better then the 1 second delay
+
 -- based off of https://wiki.haskell.org/Background_thread_example
 spawnPlaybackChannel :: IO (Music Pitch -> IO (), IO ())
 spawnPlaybackChannel = do
@@ -385,7 +416,13 @@ spawnPlaybackChannel = do
 
     return (write . Just, stop)
 
+-- including git commit info so that files can be matched up against the code that can render them
+gitInfo :: IO String
+gitInfo = readProcess "git" [ "log", "-n", "1"] "" >>= (\a -> return $ (head $ lines a) ++ "\n")
+
 saveToFile :: String -> [Piece] -> IO ()
-saveToFile filename pieces =
-    writeFile filename $ unlines $ map show pieces -- or appendFile ????
+saveToFile filename pieces = do
+    gi <- gitInfo
+    writeFile filename $ gi ++ (unlines $ map show pieces)
+    return ()
 
