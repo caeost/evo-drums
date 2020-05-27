@@ -56,59 +56,55 @@ main :: IO ()
 main = do
     hSetBuffering stdin NoBuffering -- to respond immediately to input
     (sendToPlayer, stop) <- spawnPlaybackChannel -- all instructions take effect after the current measure
-    let act :: [Piece] -> IO ()
-        act history = do
+    let act :: [[String]] -> Maybe Piece -> IO ()
+        act changes playing = do
             let queuePlay = sendToPlayer . loadPiece . traceShowId
+            let playChangesAndAct ch = case ch of [] -> act [] Nothing
+                                                  (cha:chas) -> do
+                                                    let p = parseToPiece cha
+                                                    queuePlay p
+                                                    act (cha:chas) $ Just p
+
             c <- getChar
             -- Start Interface
             case c of 'n' -> do -- generate and play a new piece
                               stdGen <- newStdGen
-                              let piece = createPiece stdGen
-                              queuePlay piece
-                              act (piece:history)
-                      's' -> do -- stop playing music
-                              stop
-                              act history
+                              let p = createPiece stdGen
+                              queuePlay p
+                              act ([show stdGen]:changes) $ Just p
+                      'p' -> do -- pause / unpause playing music
+                              case playing of Just _  -> stop >> act changes Nothing
+                                              Nothing -> playChangesAndAct changes
                       'm' -> do -- perform a random mutation of the playing track
-                              if length history > 0 then do
+                              case playing of Just p -> do
                                                           stdGen <- newStdGen
-                                                          let piece = mutate stdGen $ head history
-                                                          queuePlay piece
-                                                          act (piece:history)
-                                                    else act history
-                      'b' -> do -- go back one step
-                              if length history > 1 then do
-                                                          let (_:x:xs) = history
-                                                          queuePlay x
-                                                          act (x:xs)
-                                                    else act history
+                                                          let p = mutate p stdGen
+                                                          queuePlay p
+                                                          let (c:cs) = changes
+                                                          act ((c ++ [show stdGen]):cs) $ Just p
+                                              Nothing -> act changes playing
+                      'b' ->  do -- go back one step
+                              case changes of []    -> playChangesAndAct []
+                                              (x:xs)-> playChangesAndAct xs
                       'w' -> do -- write songs to file (takes more input)
-                              w <- getChar
-                              case w of 'a' -> do -- save all of current history
-                                                  filename <- getLine
-                                                  saveToFile filename history
-                                        's' -> do -- save current single Piece
-                                                  filename <- getLine
-                                                  saveToFile filename [head history]
-                                        _   -> return () -- return to main interface
-                              act history
+                              filename <- getLine
+                              saveToFile filename (unlines $ map show changes)
+                              act changes playing
                       'r' -> do -- read file and play (takes more input)
                               filename <- getLine
-                              h <- readAction filename
-                              queuePlay (head h)
-                              act h
-                      'u' -> act history -- TODO up vote for current piece
-                      'd' -> act history -- TODO down vote for current piece
+                              loaded <- readAction filename
+                              playChangesAndAct loaded
+                      'u' -> act changes playing -- TODO up vote for current piece
+                      'd' -> act changes playing -- TODO down vote for current piece
                       _   -> do -- nothing, default case
-                              act history
+                              act changes playing
             -- End Interface
-    act []
+    act [] Nothing
 
-
-readAction :: String -> IO [Piece]
+readAction :: String -> IO [[String]]
 readAction filename= do
     contents <- readFile filename
-    return $ map (\ p -> (read p) :: Piece) $ filter (isPrefixOf "Piece {") $ lines contents
+    return $ map (\a -> (read a) :: [String]) $ filter (isPrefixOf "[") $ lines contents
 
 {--
  - The Constructors Used By All The Parts Of This System
@@ -120,8 +116,6 @@ readAction filename= do
  - Potentially it would be better to not destructively write to the various weights but
  - instead to save a list of what operations are applied to them.
  -}
-
-data Ancestry = Ancestry [Int]
 
 data Piece = Piece { seed   :: Int, -- the initial random seed used to generate the Piece
                      beats   :: Int, -- how many beats per measure in the Piece
@@ -163,6 +157,12 @@ data Track = Track  { tSeed :: Int, -- seed used to generate notes for this trac
  -}
 percussionRange :: (Int, Int)
 percussionRange = (0, 46) -- 47 percussion instruments are defined in Euterpea
+
+parseToPiece :: [String] -> Piece
+parseToPiece (i:ms) =
+    let root = createPiece $ ((read i) :: StdGen)
+        folder r m = mutate r $ (read m :: StdGen)
+    in  foldl folder root ms
 
 createPiece :: RandomGen g => g -> Piece
 createPiece g = fst $ runState (do
@@ -234,8 +234,8 @@ createTrack i s =
  - sg = sub generator, the generator(s) given to whatever sub operations
  -}
 -- take a random gen and return a mutator with a split off random gen applied to it
-mutate :: RandomGen g => g -> Piece -> Piece
-mutate g =
+mutate :: RandomGen g => Piece -> g -> Piece
+mutate p g =
     let mutators = [
           addPart,
           removePart,
@@ -246,7 +246,7 @@ mutate g =
           modifyRestDuration]
         (lg, sg) = split g
         (index, _) = randomR (0, (length mutators) - 1) lg
-    in  (mutators!!index) sg
+    in  (mutators!!index) sg p
 
 addPart :: RandomGen g => g -> Piece -> Piece
 addPart g p =
@@ -420,9 +420,9 @@ spawnPlaybackChannel = do
 gitInfo :: IO String
 gitInfo = readProcess "git" [ "log", "-n", "1"] "" >>= (\a -> return $ (head $ lines a) ++ "\n")
 
-saveToFile :: String -> [Piece] -> IO ()
-saveToFile filename pieces = do
+saveToFile :: String -> String -> IO ()
+saveToFile filename contents = do
     gi <- gitInfo
-    writeFile filename $ gi ++ (unlines $ map show pieces)
+    writeFile filename $ gi ++ contents
     return ()
 
