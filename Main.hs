@@ -58,46 +58,43 @@ main = do
     (sendToPlayer, stop) <- spawnPlaybackChannel -- all instructions take effect after the current measure
     let act :: [[String]] -> Maybe Piece -> IO ()
         act changes playing = do
+            let continue = act changes playing
             let queuePlay = sendToPlayer . loadPiece . traceShowId
-            let playChangesAndAct ch = case ch of [] -> act [] Nothing
-                                                  (cha:chas) -> do
-                                                    let p = parseToPiece cha
-                                                    queuePlay p
-                                                    act (cha:chas) $ Just p
+            let playAndContinue chas p  = queuePlay p >> (act chas $ Just p)
+            let playChangesAndContinue chas = case chas of []      -> act [] Nothing
+                                                           l@(x:_) -> playAndContinue l (parseToPiece x)
 
             c <- getChar
             -- Start Interface
             case c of 'n' -> do -- generate and play a new piece
                               stdGen <- newStdGen
                               let p = createPiece stdGen
-                              queuePlay p
-                              act ([show stdGen]:changes) $ Just p
+                              playAndContinue ([show stdGen]:changes) p
                       'p' -> do -- pause / unpause playing music
                               case playing of Just _  -> stop >> act changes Nothing
-                                              Nothing -> playChangesAndAct changes
+                                              Nothing -> playChangesAndContinue changes
                       'm' -> do -- perform a random mutation of the playing track
-                              case playing of Just p -> do
+                              case playing of Just x -> do
                                                           stdGen <- newStdGen
-                                                          let p = mutate p stdGen
-                                                          queuePlay p
-                                                          let (c:cs) = changes
-                                                          act ((c ++ [show stdGen]):cs) $ Just p
-                                              Nothing -> act changes playing
-                      'b' ->  do -- go back one step
-                              case changes of []    -> playChangesAndAct []
-                                              (x:xs)-> playChangesAndAct xs
+                                                          let p = mutate x stdGen
+                                                          let (y:ys) = changes
+                                                          playAndContinue ((y ++ [show stdGen]):ys) p
+                                              Nothing -> continue
+                      'b' -> do -- go back one step
+                              case changes of []    -> playChangesAndContinue []
+                                              (_:xs)-> playChangesAndContinue xs
                       'w' -> do -- write songs to file (takes more input)
                               filename <- getLine
                               saveToFile filename (unlines $ map show changes)
-                              act changes playing
+                              continue
                       'r' -> do -- read file and play (takes more input)
                               filename <- getLine
                               loaded <- readAction filename
-                              playChangesAndAct loaded
-                      'u' -> act changes playing -- TODO up vote for current piece
-                      'd' -> act changes playing -- TODO down vote for current piece
+                              playChangesAndContinue loaded
+                      'u' -> continue -- TODO up vote for current piece
+                      'd' -> continue -- TODO down vote for current piece
                       _   -> do -- nothing, default case
-                              act changes playing
+                              continue
             -- End Interface
     act [] Nothing
 
@@ -410,7 +407,7 @@ spawnPlaybackChannel = do
         work    = do
                    mJob <- atomically(takeTMVar workVar) -- this should block on receiving a value
                    case mJob of Nothing -> work -- waiting on a new job
-                                Just music -> pieceWork $ lineToList music
+                                Just music -> E.catch (pieceWork $ lineToList music) die
 
     _ <- forkIO work
 

@@ -2,7 +2,7 @@
 
 cat Main.hs \
   | awk '/Start Interface/,/End Interface/' \
-  | grep '\->\|getLine' \
+  | grep "['_]"'\s*\->\|getLine' \
   | cut -c 13- \
   | grep -v "TODO" \
   | sed 's/_/other key/' \
