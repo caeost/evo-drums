@@ -55,23 +55,27 @@ import Debug.Trace
 main :: IO ()
 main = do
     hSetBuffering stdin NoBuffering -- to respond immediately to input
-    (sendToPlayer, stop) <- spawnPlaybackChannel -- all instructions take effect after the current measure
-    let act :: [[String]] -> Maybe Piece -> IO ()
+    (showMain, showPlayback) <- spawnUXChannel
+    (sendToPlayer, stop) <- spawnPlaybackChannel showPlayback -- all instructions take effect after the current measure
+    let queuePlay = sendToPlayer . loadPiece . traceShowId
+
+        act :: [[String]] -> Maybe Piece -> IO ()
         act changes playing = do
             let continue = act changes playing
-            let queuePlay = sendToPlayer . loadPiece . traceShowId
-            let playAndContinue chas p  = queuePlay p >> (act chas $ Just p)
-            let playChangesAndContinue chas = case chas of []      -> act [] Nothing
-                                                           l@(x:_) -> playAndContinue l (parseToPiece x)
+                pauseAndContinue = stop >> act changes Nothing
+                playAndContinue chas p  = queuePlay p >> (act chas $ Just p)
+                playChangesAndContinue chas = case chas of []   -> act [] Nothing
+                                                           (x:_)-> playAndContinue chas (parseToPiece x)
 
             c <- getChar
+            showMain $ "Entered: " ++ show c
             -- Start Interface
             case c of 'n' -> do -- generate and play a new piece
                               stdGen <- newStdGen
                               let p = createPiece stdGen
                               playAndContinue ([show stdGen]:changes) p
                       'p' -> do -- pause / unpause playing music
-                              case playing of Just _  -> stop >> act changes Nothing
+                              case playing of Just _  -> pauseAndContinue
                                               Nothing -> playChangesAndContinue changes
                       'm' -> do -- perform a random mutation of the playing track
                               case playing of Just x -> do
@@ -81,7 +85,7 @@ main = do
                                                           playAndContinue ((y ++ [show stdGen]):ys) p
                                               Nothing -> continue
                       'b' -> do -- go back one step
-                              case changes of []    -> playChangesAndContinue []
+                              case changes of []    -> pauseAndContinue
                                               (_:xs)-> playChangesAndContinue xs
                       'w' -> do -- write songs to file (takes more input)
                               filename <- getLine
@@ -261,6 +265,9 @@ removePart g p =
         (left, (_:right)) = splitAt indexToRemove pas
     in  if (length pas) > 1 then p{parts=(left++right)} else p
 
+--splitPart :: RandomGen g => g -> Piece -> Piece
+--splitPart g p = p{parts=}
+
 addTrack :: RandomGen g => g -> Piece -> Piece
 addTrack g p = -- adds the same track to each part changed
     let (lg, sg) = split g
@@ -270,9 +277,7 @@ addTrack g p = -- adds the same track to each part changed
     in  whichParts adder sg p
 
 modifyRepeats :: RandomGen g => g -> Piece -> Piece
-modifyRepeats g p =
-    let (factor, ng) = randomR (0,3) g
-    in  whichParts (\ _ pa -> pa{repeats=2^(factor::Int)}) ng p
+modifyRepeats = whichParts (\g pa -> pa{repeats=2^((fst $ randomR (0,3) g)::Int)})
 
 modifyPlayWeights :: RandomGen g => g -> Piece -> Piece
 modifyPlayWeights = whichParts (whichTracks (\g t -> t{playWeight=(playWeight t) + (weighter g)}))
@@ -289,15 +294,13 @@ modifyRestDuration = whichParts (whichTracks (\g t -> t{restDurWeight=(restDurWe
  - utils for mutatin'
  -}
 weighter :: RandomGen g => g -> Int -- swings by at most +-10
-weighter g =
-    let (out, _)= randomR (-1000, 1000) g
-    in  round $ (out :: Int) % 100
+weighter g = fst $ randomR (-10, 10) g
 
 whichParts :: RandomGen g => (g -> Part -> Part) -> g -> Piece -> Piece
 whichParts t g p = -- probably should balance the "All" against the number of items in the list
     let options = [
-          mutateAllParts,
-          mutateRandomPart]
+            mutateAllParts,
+            mutateRandomPart]
         (index, sg) = randomR (0, (length options) - 1) g
     in  (options!!index) t sg p
 
@@ -310,8 +313,8 @@ mutateRandomPart f g p = p{parts=mutateRandomInList f g (parts p)}
 whichTracks :: RandomGen g => (g -> Track -> Track) -> g -> Part -> Part
 whichTracks t g pa = -- probably should balance the "All" against the number of items in the list
     let options = [
-          mutateAllTracks,
-          mutateRandomTrack]
+            mutateAllTracks,
+            mutateRandomTrack]
         (index, nextG) = randomR (0, (length options) - 1) g
     in  (options!!index) t nextG pa
 
@@ -381,8 +384,33 @@ pp :: PlayParams
 pp = defParams{closeDelay=0} -- may need to tune this but it is better then the 1 second delay
 
 -- based off of https://wiki.haskell.org/Background_thread_example
-spawnPlaybackChannel :: IO (Music Pitch -> IO (), IO ())
-spawnPlaybackChannel = do
+spawnUXChannel :: IO(String -> IO(), String -> IO ())
+spawnUXChannel = do
+    isDirty <- atomically (newTVar False)
+    stateVar <- atomically (newTVar ("", ""))
+
+    let render = do
+                  d <- readTVarIO isDirty
+                  if d == True
+                    then do
+                      clean
+                      (a,b) <- readTVarIO stateVar
+                      callCommand "clear"
+                      putStrLn $ a ++ "\n" ++ b
+                    else return ()
+                  yield
+                  render
+        dirty = atomically $ writeTVar isDirty True
+        clean = atomically $ writeTVar isDirty False
+        write (Left m)  = atomically(modifyTVar stateVar (\(_,b) -> (m, b))) >> dirty
+        write (Right m) = atomically(modifyTVar stateVar (\(a,_) -> (a, m))) >> dirty
+
+    _ <- forkIO render
+
+    return (write . Left, write . Right)
+
+spawnPlaybackChannel :: (String -> IO()) -> IO (Music Pitch -> IO (), IO ())
+spawnPlaybackChannel renderChannel = do
     workVar <- atomically newEmptyTMVar
 
     let write j = atomically(do
@@ -395,23 +423,42 @@ spawnPlaybackChannel = do
                    tid <- myThreadId
                    print ("Playback Thread " ++ show tid ++ " died with exception " ++ show (err :: ErrorCall))
                    stop
-        pieceWork :: [Music Pitch] -> IO ()
-        pieceWork [] = work
-        pieceWork (x:xs) = do
+        pieceWork :: Int -> [Music Pitch] -> IO ()
+        pieceWork _ [] = work
+        pieceWork i xs = do
                    noNewMessage <- atomically(isEmptyTMVar workVar) -- peek at the state
                    if noNewMessage then do
-                                             playC pp x
-                                             pieceWork (xs ++ [x])
+                                          let m = xs!!i
+                                          let nextI = (i+1) `mod` (length xs)
+                                          playC pp m
+                                          renderChannel $ renderDisplay m (xs!!nextI)
+                                          pieceWork nextI xs
                                    else work
         work :: IO ()
         work    = do
                    mJob <- atomically(takeTMVar workVar) -- this should block on receiving a value
                    case mJob of Nothing -> work -- waiting on a new job
-                                Just music -> E.catch (pieceWork $ lineToList music) die
+                                Just music -> E.catch (pieceWork 0 $ lineToList music) die
 
     _ <- forkIO work
 
     return (write . Just, stop)
+
+renderDisplay :: Music a -> Music a -> String
+renderDisplay m n =
+    let current  = map ("\x1b[1m" ++) $ histiogram m
+        upcoming = map ("\x1b[0m" ++) $ histiogram n
+    in  unlines $ map (\(a,b) -> a ++ b)$ zip current upcoming
+
+-- sixteenth note is the shortest note currently supported, else the 16 here has to change
+histiogram :: Music a -> [String]
+histiogram m =
+    let numberize o = lineForANote o : (take (fromIntegral ((numerator $ 16 * (dur o)) - 1)) $ repeat ' ')
+    in  map (foldl1 (++)) $ map ((map numberize) . lineToList) $ chordToList m
+
+lineForANote :: Music a -> Char
+lineForANote (Prim (Rest _)) = ' '
+lineForANote _               = '|'
 
 -- including git commit info so that files can be matched up against the code that can render them
 gitInfo :: IO String
@@ -422,4 +469,10 @@ saveToFile filename contents = do
     gi <- gitInfo
     writeFile filename $ gi ++ contents
     return ()
+
+chordToList :: Music a -> [Music a]
+chordToList (Prim (Rest 0))    = []
+chordToList (n :=: ns)         = n : chordToList ns
+chordToList _                  =
+    error "chordToList: argument not created by function chord"
 
