@@ -430,8 +430,9 @@ spawnPlaybackChannel renderChannel = do
                    if noNewMessage then do
                                           let m = xs!!i
                                           let nextI = (i+1) `mod` (length xs)
-                                          playC pp m
                                           renderChannel $ renderDisplay m (xs!!nextI)
+                                          traceIO $ show m
+                                          playC pp m
                                           pieceWork nextI xs
                                    else work
         work :: IO ()
