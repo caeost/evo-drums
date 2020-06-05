@@ -1,3 +1,5 @@
+#!/usr/bin/env stack
+-- stack --resolver lts-12.21 script
 module Main where
 
 import Euterpea hiding(a,as,b,bs,c,cs,d,ds,e,es,f,fs,g,gs, left, right)
@@ -6,7 +8,6 @@ import System.IO
 import Control.Concurrent
 import Control.Exception as E
 import Control.Concurrent.STM
-import Data.Ratio
 import Data.List (isPrefixOf)
 import System.Process
 import EvoGen
@@ -115,31 +116,6 @@ pp :: PlayParams
 pp = defParams{closeDelay=0} -- may need to tune this but it is better then the 1 second delay
 
 -- based off of https://wiki.haskell.org/Background_thread_example
-spawnUXChannel :: IO(String -> IO(), String -> IO ())
-spawnUXChannel = do
-    isDirty <- atomically (newTVar False)
-    stateVar <- atomically (newTVar ("", ""))
-
-    let render = do
-                  d <- readTVarIO isDirty
-                  if d == True
-                    then do
-                      clean
-                      (a,b) <- readTVarIO stateVar
-                      callCommand "clear"
-                      putStrLn $ a ++ "\n" ++ b
-                    else return ()
-                  yield
-                  render
-        dirty = atomically $ writeTVar isDirty True
-        clean = atomically $ writeTVar isDirty False
-        write (Left m)  = atomically(modifyTVar stateVar (\(_,b) -> (m, b))) >> dirty
-        write (Right m) = atomically(modifyTVar stateVar (\(a,_) -> (a, m))) >> dirty
-
-    _ <- forkIO render
-
-    return (write . Left, write . Right)
-
 spawnPlaybackChannel :: (String -> IO()) -> IO (Music Pitch -> IO (), IO ())
 spawnPlaybackChannel renderChannel = do
     workVar <- atomically newEmptyTMVar
@@ -162,7 +138,6 @@ spawnPlaybackChannel renderChannel = do
                                           let m = xs!!i
                                           let nextI = (i+1) `mod` (length xs)
                                           renderChannel $ renderDisplay m (xs!!nextI)
-                                          traceIO $ show m
                                           playC pp m
                                           pieceWork nextI xs
                                    else work
@@ -176,21 +151,54 @@ spawnPlaybackChannel renderChannel = do
 
     return (write . Just, stop)
 
-renderDisplay :: Music a -> Music a -> String
+renderDisplay :: Show a => Music a -> Music a -> String
 renderDisplay m n =
-    let current  = map ("\x1b[1m" ++) $ histiogram m
-        upcoming = map ("\x1b[0m" ++) $ histiogram n
-    in  unlines $ map (\(a,b) -> a ++ b)$ zip current upcoming
+    let current  = map ("\x1b[1m" ++) $ histiogram m-- bolded
+        upcoming = map ("\x1b[0m" ++) $ histiogram n -- not bolded
+        cho = chordToList m
+    in  (unlines $ map (\(a,b) -> a ++ b) $ zip current upcoming) ++ "\n" ++ show cho
 
--- sixteenth note is the shortest note currently supported, else the 16 here has to change
 histiogram :: Music a -> [String]
 histiogram m =
-    let numberize o = lineForANote o : (take (fromIntegral ((numerator $ 16 * (dur o)) - 1)) $ repeat ' ')
+    let s = foldl1 min durs
+        trailingSpace o = round $ ((dur o) / s) - 1
+        numberize o = lineForANote o : (take (trailingSpace o) $ repeat ' ')
     in  map (foldl1 (++)) $ map ((map numberize) . lineToList) $ chordToList m
 
 lineForANote :: Music a -> Char
 lineForANote (Prim (Rest _)) = ' '
 lineForANote _               = '|'
+
+chordToList :: Music a -> [Music a]
+chordToList (Prim (Rest 0))    = []
+chordToList (n :=: ns)         = n : chordToList ns
+chordToList _                  =
+    error "chordToList: argument not created by function chord"
+
+spawnUXChannel :: IO(String -> IO(), String -> IO ())
+spawnUXChannel = do
+    isDirty <- atomically (newTVar False)
+    stateVar <- atomically (newTVar ("", ""))
+
+    let render = do
+                  d <- readTVarIO isDirty
+                  if d == True
+                    then do
+                      (a,b) <- readTVarIO stateVar
+                      callCommand "clear"
+                      putStrLn $ a ++ "\n" ++ b
+                      clean
+                    else return ()
+                  yield
+                  render
+        dirty = atomically $ writeTVar isDirty True
+        clean = atomically $ writeTVar isDirty False
+        write (Left m)  = atomically(modifyTVar stateVar (\(_,b) -> (m, b))) >> dirty
+        write (Right m) = atomically(modifyTVar stateVar (\(a,_) -> (a, m))) >> dirty
+
+    _ <- forkIO render
+
+    return (write . Left, write . Right)
 
 -- including git commit info so that files can be matched up against the code that can render them
 gitInfo :: IO String
@@ -201,10 +209,4 @@ saveToFile filename contents = do
     gi <- gitInfo
     writeFile filename $ gi ++ contents
     return ()
-
-chordToList :: Music a -> [Music a]
-chordToList (Prim (Rest 0))    = []
-chordToList (n :=: ns)         = n : chordToList ns
-chordToList _                  =
-    error "chordToList: argument not created by function chord"
 

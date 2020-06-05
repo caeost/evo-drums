@@ -4,7 +4,6 @@ import Euterpea hiding(a,as,b,bs,c,cs,d,ds,e,es,f,fs,g,gs, left, right)
 import Control.Monad.State (state, runState)
 import System.Random
 import Data.Ratio
-import System.Process
 
 {--
  - The Constructors Used By All The Parts Of This System
@@ -34,6 +33,8 @@ data Track = Track  { tSeed :: Int, -- seed used to generate notes for this trac
                       restDurWeight :: Int -- make the track tend towards long/short rests
                     } deriving (Show, Read, Eq)
 
+durs :: [Dur]
+durs = [sn,en,qn,hn,wn] -- supporting sixteenth to whole notes, no dots
 {--
  - Generating and manipulating a Piece
  -
@@ -256,7 +257,6 @@ trackToMeasure :: Int -> Track -> Music (Pitch)
 trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDurWeight=rw} =
     let randomBounds@(lower,higher) = (1,100)
         sound = perc (toEnum i::PercussionSound)
-        durs = [sn,en,qn,hn,wn] -- supporting sixteenth to whole notes, no dots
         randomList = randomRs randomBounds (mkStdGen s)
         playThreshold = min (lower-1) $ max (higher-1) (round ((higher - lower) % 2) + pw)
 
