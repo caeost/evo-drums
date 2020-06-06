@@ -16,18 +16,18 @@ import Data.Ratio
  - instead to save a list of what operations are applied to them.
  -}
 
-data Piece = Piece { seed   :: Int, -- the initial random seed used to generate the Piece
-                     beats   :: Int, -- how many beats per measure in the Piece
+data Piece = Piece { seed  :: Int, -- the initial random seed used to generate the Piece
+                     beats :: Int, -- how many beats per measure in the Piece
                      parts :: [Part] -- sequential ordered segments of the Piece
                    } deriving (Show, Read, Eq)
 
 data Part = Part { pSeed   :: Int, -- seed used to generate the initial Part
                    repeats :: Int, -- how many times to repeat this part for within the piece
-                   tracks :: [Track] -- different instruments that play simultaneously for this part
+                   tracks  :: [Track] -- different instruments that play simultaneously for this part
                  } deriving (Show, Read, Eq)
 
 data Track = Track  { tSeed :: Int, -- seed used to generate notes for this track
-                      inst :: Int, -- the instrument used by this track
+                      inst  :: Int, -- the instrument used by this track
                       playWeight :: Int, -- make the track more/less likely to play notes
                       noteDurWeight :: Int, -- make the track tend towards long/short notes
                       restDurWeight :: Int -- make the track tend towards long/short rests
@@ -90,10 +90,11 @@ randomRs' i r g = ((take i $ randomRs r g), fst $ split g)
 
 createPart :: RandomGen g => [Int] -> g -> Part
 createPart insts gen =
-    let (val, nextGen) = random gen
+    let (lg, sg) = split gen
+        (val, nlg) = random lg
     in  Part { pSeed=val,
-               repeats=2, -- temporary fixed value
-               tracks=createTracks insts nextGen}
+               repeats=rLimitedPowerOfTwo nlg,
+               tracks=createTracks insts sg}
 
 createTracks :: RandomGen g => [Int] -> g -> [Track]
 createTracks [] _ = []
@@ -177,7 +178,7 @@ addTrack g p = -- adds the same track to each part changed
     in  whichParts adder sg p
 
 modifyRepeats :: RandomGen g => g -> Piece -> Piece
-modifyRepeats = whichParts (\g pa -> pa{repeats=2^((fst $ randomR (0,3) g)::Int)})
+modifyRepeats = whichParts (\g pa -> pa{repeats=rLimitedPowerOfTwo g})
 
 modifyPlayWeights :: RandomGen g => g -> Piece -> Piece
 modifyPlayWeights = whichParts (whichTracks (\g t -> t{playWeight=(playWeight t) + (weighter g)}))
@@ -195,6 +196,9 @@ modifyRestDuration = whichParts (whichTracks (\g t -> t{restDurWeight=(restDurWe
  -}
 weighter :: RandomGen g => g -> Int -- swings by at most +-10
 weighter g = fst $ randomR (-10, 10) g
+
+rLimitedPowerOfTwo :: RandomGen g => g -> Int
+rLimitedPowerOfTwo g = 2^((fst $ randomR (0,3) g)::Int)
 
 whichParts :: RandomGen g => (g -> Part -> Part) -> g -> Piece -> Piece
 whichParts t g p = -- probably should balance the "All" against the number of items in the list
@@ -258,7 +262,7 @@ trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDur
     let randomBounds@(lower,higher) = (1,100)
         sound = perc (toEnum i::PercussionSound)
         randomList = randomRs randomBounds (mkStdGen s)
-        playThreshold = min (lower-1) $ max (higher-1) (round ((higher - lower) % 2) + pw)
+        playThreshold = max (lower-1) $ min (higher-1) (round ((higher - lower) % 2) + pw)
 
         durator space weight r =
             let candidates = filter (\n -> (denominator $ space / n) == 1) durs
@@ -270,7 +274,7 @@ trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDur
         consume space (r1:r2:rs)
             | space > 0 =
                    let isNote = r1 > playThreshold
-                       event = if isNote then sound else rest 
+                       event = if isNote then sound else rest
                        d = durator space (if isNote then nw else rw) r2
                    in  event d : consume (space - d) rs
             | otherwise = []

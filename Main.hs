@@ -153,7 +153,7 @@ spawnPlaybackChannel renderChannel = do
 
 renderDisplay :: Show a => Music a -> Music a -> String
 renderDisplay m n =
-    let current  = map ("\x1b[1m" ++) $ histiogram m-- bolded
+    let current  = map ("\x1b[1m" ++) $ histiogram m -- bolded
         upcoming = map ("\x1b[0m" ++) $ histiogram n -- not bolded
         cho = chordToList m
     in  (unlines $ map (\(a,b) -> a ++ b) $ zip current upcoming) ++ "\n" ++ show cho
@@ -170,7 +170,7 @@ lineForANote (Prim (Rest _)) = ' '
 lineForANote _               = '|'
 
 chordToList :: Music a -> [Music a]
-chordToList (Prim (Rest 0))    = []
+chordToList (Prim (Rest _))    = []
 chordToList (n :=: ns)         = n : chordToList ns
 chordToList _                  =
     error "chordToList: argument not created by function chord"
