@@ -26,12 +26,22 @@ data Part = Part { pSeed   :: Int, -- seed used to generate the initial Part
                    tracks  :: [Track] -- different instruments that play simultaneously for this part
                  } deriving (Show, Read, Eq)
 
+-- TODO weights 
 data Track = Track  { tSeed :: Int, -- seed used to generate notes for this track
                       inst  :: Int, -- the instrument used by this track
                       playWeight :: Int, -- make the track more/less likely to play notes
                       noteDurWeight :: Int, -- make the track tend towards long/short notes
                       restDurWeight :: Int -- make the track tend towards long/short rests
                     } deriving (Show, Read, Eq)
+
+data Weight = Int -- TODO just a flat value applied to everything
+            | Fun Int Int Int -- TODO (function determining weight distribution, start, end, phase)
+    deriving (Show, Read, Eq)
+
+data Fun = Linear
+         | Sin
+         | Square
+    deriving (Show, Read, Eq)
 
 durs :: [Dur]
 durs = [sn,en,qn,hn,wn] -- supporting sixteenth to whole notes, no dots
@@ -58,12 +68,6 @@ durs = [sn,en,qn,hn,wn] -- supporting sixteenth to whole notes, no dots
  -}
 percussionRange :: (Int, Int)
 percussionRange = (0, 46) -- 47 percussion instruments are defined in Euterpea
-
-parseToPiece :: [String] -> Piece
-parseToPiece (i:ms) =
-    let root = createPiece $ ((read i) :: StdGen)
-        folder r m = mutate r $ (read m :: StdGen)
-    in  foldl folder root ms
 
 createPiece :: RandomGen g => g -> Piece
 createPiece g = fst $ runState (do
@@ -250,14 +254,14 @@ mutateRandomInList f g list =
  - For example the phrase function can be used like `phrase [Dyn $ Accent 0.5]` to make a note
  - half intensity. This could be combined in different patterns (every other, or per measure, etc.)
  -}
-loadPiece :: Piece -> Music (Pitch) -- this Music (Pitch) should be at the top level a "line" of measures
+loadPiece :: Piece -> Music Pitch -- this Music a should be at the top level a "line" of measures
 loadPiece (Piece _ b p) = line $ foldl (++) [] $ map (partToMeasures b) p
 
-partToMeasures :: Int -> Part -> [Music (Pitch)]
+partToMeasures :: Int -> Part -> [Music Pitch]
 partToMeasures b pa = take (repeats pa) $ repeat (chord $ map (trackToMeasure b) (tracks pa))
 
 -- TODO triplets!
-trackToMeasure :: Int -> Track -> Music (Pitch)
+trackToMeasure :: Int -> Track -> Music Pitch
 trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDurWeight=rw} =
     let randomBounds@(lower,higher) = (1,100)
         sound = perc (toEnum i::PercussionSound)
@@ -273,7 +277,7 @@ trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDur
         consume _ [_]   = []
         consume space (r1:r2:rs)
             | space > 0 =
-                   let isNote = r1 > playThreshold
+                   let isNote = r1 > playThreshold -- TODO + or - with avg
                        event = if isNote then sound else rest
                        d = durator space (if isNote then nw else rw) r2
                    in  event d : consume (space - d) rs

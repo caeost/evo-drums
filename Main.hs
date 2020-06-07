@@ -11,11 +11,12 @@ import Control.Concurrent.STM
 import Data.List (isPrefixOf)
 import System.Process
 import EvoGen
+import Control.DeepSeq
 
 import Debug.Trace
 
 {--
- - Evo-Drums
+ - EvoDrums
  -
  - The goal of this is to provide a drummer that I can jam along with.
  -
@@ -57,16 +58,18 @@ main :: IO ()
 main = do
     hSetBuffering stdin NoBuffering -- to respond immediately to input
     (showMain, showPlayback) <- spawnUXChannel
-    (sendToPlayer, stop) <- spawnPlaybackChannel showPlayback -- all instructions take effect after the current measure
-    let queuePlay = sendToPlayer . loadPiece . traceShowId
+    (sendToPlayer, sendControls, clearControls, stop) <- spawnPlaybackChannel showPlayback -- all instructions take effect after the current measure
 
-        act :: [[String]] -> Maybe Piece -> IO ()
-        act changes playing = do
+    let queuePlay = sendToPlayer . loadPiece . traceShowId
+        act :: [[Form]] -> Maybe Piece -> IO ()
+        act changes playing = do -- TODO playing should not be set in here but instead from what is actually playing
             let continue = act changes playing
                 pauseAndContinue = stop >> act changes Nothing
                 playAndContinue chas p  = queuePlay p >> (act chas $ Just p)
-                playChangesAndContinue chas = case chas of []   -> act [] Nothing
-                                                           (x:_)-> playAndContinue chas (parseToPiece x)
+                playChangesAndContinue chas =
+                    case chas of []   -> act [] Nothing
+                                 (x:_)-> case parseToPiece x of Nothing -> stop >> act chas Nothing
+                                                                Just p  -> playAndContinue chas p
 
             c <- getChar
             showMain $ "Entered: " ++ show c --TODO have a change set displayed (like 10x mutations)
@@ -74,7 +77,7 @@ main = do
             case c of 'n' -> do -- generate and play a new piece
                               stdGen <- newStdGen
                               let p = createPiece stdGen
-                              playAndContinue ([show stdGen]:changes) p
+                              playAndContinue ([Form 0 $ show stdGen]:changes) p
                       'p' -> do -- pause / unpause playing music
                               case playing of Just _  -> pauseAndContinue
                                               Nothing -> playChangesAndContinue changes
@@ -82,74 +85,128 @@ main = do
                               case playing of Just x -> do
                                                           stdGen <- newStdGen
                                                           let p = mutate x stdGen
-                                                          let (y:ys) = changes
-                                                          playAndContinue ((y ++ [show stdGen]):ys) p
+                                                              (y:ys) = changes
+                                                              (Form lf _) =  last y -- mutated track has same fitness as its predecessor
+                                                              cur = y ++ [(Form lf $ show stdGen)]
+                                                          playAndContinue (cur:ys) p
                                               Nothing -> continue
+                      'f' -> do -- TODO interbreed tracks
+                              case playing of Just _  -> continue -- TODO combine current track with random other
+                                              Nothing -> continue -- TODO combine two random tracks
                       'b' -> do -- go back one step
                               case changes of []    -> pauseAndContinue
                                               (_:xs)-> playChangesAndContinue xs
+                      'e' -> continue -- TODO edit piece as text
                       'w' -> do -- write songs to file (takes more input)
                               filename <- getLine
                               saveToFile filename (unlines $ map show changes)
                               continue
                       'r' -> do -- read file and play (takes more input)
-                              filename <- getLine
-                              loaded <- readAction filename
-                              playChangesAndContinue loaded
-                      'u' -> continue -- TODO up vote for current piece
-                      'd' -> continue -- TODO down vote for current piece
+                              getLine >>= readFormFile >>= playChangesAndContinue
+                      'u' -> continue -- TODO up vote for current piece makes it more used by 'f'
+                      'd' -> continue -- TODO down vote for current piece makes it less used by 'f'
+                      'c' -> do -- Control Euterpea "Control"s (takes more input)
+                              ic <- getChar
+                              if ic == 'c'
+                                  then clearControls
+                                  else case playing of  Just _  -> musicControl ic sendControls
+                                                        Nothing -> return ()
+                              continue
                       _   -> do -- nothing, default case
                               continue
             -- End Interface
     act [] Nothing
 
-readAction :: String -> IO [[String]]
-readAction filename= do
+parseToPiece :: [Form] -> Maybe Piece
+parseToPiece []              = Nothing
+parseToPiece ((Form _ i):ms) =
+    let root = createPiece $ (read i :: StdGen)
+        folder p (Form _ m) = mutate p $ (read m :: StdGen)
+    in  Just $ foldl folder root ms
+
+
+readFormFile :: String -> IO [[Form]]
+readFormFile filename= do
     contents <- readFile filename
-    return $ map (\a -> (read a) :: [String]) $ filter (isPrefixOf "[") $ lines contents
+    return $ map (\a -> (read a) :: [Form]) $ filter (isPrefixOf "[") $ lines contents
+
+musicControl :: Char -> (Control -> IO ()) -> IO ()
+musicControl c out =
+    do
+      case c of 't' -> do -- enter tempo like 1 % 4
+                        at <- getLine
+                        let t = read at :: Dur
+                        out $ Tempo t
+                _   -> return ()
+
+data Form = Form Int String deriving (Read, Show) -- TODO add: | Int Piece
 
 {--
  - Utility functions for IO
  -}
-
 pp :: PlayParams
 pp = defParams{closeDelay=0} -- may need to tune this but it is better then the 1 second delay
 
 -- based off of https://wiki.haskell.org/Background_thread_example
-spawnPlaybackChannel :: (String -> IO()) -> IO (Music Pitch -> IO (), IO ())
-spawnPlaybackChannel renderChannel = do
+spawnPlaybackChannel :: (Show a, ToMusic1 a, NFData a) => (String -> IO()) -> IO (Music a -> IO (), Control -> IO (), IO (), IO ())
+spawnPlaybackChannel renderF = do
     workVar <- atomically newEmptyTMVar
+    contQueue <- atomically newTQueue
 
     let write j = atomically(do
                               empty <- isEmptyTMVar workVar
                               if empty
                                   then putTMVar workVar j
                                   else swapTMVar workVar j >> return ())
-        stop    = write Nothing
-        die err   = do
+        control j = atomically(writeTQueue contQueue j)
+        clearControls = control Nothing
+        stop      = write Nothing
+        die err = do
                    tid <- myThreadId
                    print ("Playback Thread " ++ show tid ++ " died with exception " ++ show (err :: ErrorCall))
                    stop
-        pieceWork :: Int -> [Music Pitch] -> IO ()
-        pieceWork _ [] = work
-        pieceWork i xs = do
-                   noNewMessage <- atomically(isEmptyTMVar workVar) -- peek at the state
-                   if noNewMessage then do
-                                          let m = xs!!i
-                                          let nextI = (i+1) `mod` (length xs)
-                                          renderChannel $ renderDisplay m (xs!!nextI)
-                                          playC pp m
-                                          pieceWork nextI xs
-                                   else work
-        work :: IO ()
-        work    = do
-                   mJob <- atomically(takeTMVar workVar) -- this should block on receiving a value
-                   case mJob of Nothing -> work -- waiting on a new job
-                                Just music -> E.catch (pieceWork 0 $ lineToList music) die
+        pieceWork _ ec [] = work 0 ec
+        pieceWork i ec xs = do
+                   noNewMessage <- atomically $ isEmptyTMVar workVar -- peek at the state
+                   if noNewMessage
+                      then do
+                          -- play loop run on every measure start!!
+                          let safe = if i < length xs then i else 0
+                              bm = xs!!safe
+                              nextI = (safe+1) `mod` (length xs)
 
-    _ <- forkIO work
+                          -- see if there are new controls
+                          incoming <- atomically(readAllFromTQueue contQueue)
+                          let controls = takeTillFirstNothing $ (reverse incoming) ++ (map Just ec)
 
-    return (write . Just, stop)
+                          renderF $ renderDisplay bm (xs!!nextI)
+                          playC pp $ foldl (\m c -> Modify c m) bm controls
+                          -- TODO write playing back to boost up score of track
+                          pieceWork nextI controls xs
+                      else work i ec
+        work :: Int -> [Control] -> IO ()
+        work i c  =
+            do
+                mJob <- atomically(takeTMVar workVar) -- this should block on receiving a value but I don't think it does??
+                case mJob of Nothing -> work 0 c -- waiting on a new job
+                             Just music -> E.catch (pieceWork i c $ lineToList music) die
+
+    _ <- forkIO $ work 0 []
+
+    return (write . Just, control . Just, clearControls, stop)
+
+readAllFromTQueue :: TQueue a -> STM [a]
+readAllFromTQueue q = do
+                        m <- tryReadTQueue q
+                        case m of Just a  -> do
+                                              sub <- readAllFromTQueue q -- I think this breaks tail recursion optimization but I don't know how else to do it :(
+                                              return $ a:sub
+                                  Nothing -> return []
+
+takeTillFirstNothing :: [Maybe a] -> [a]
+takeTillFirstNothing ((Just c):mcs) = c:(takeTillFirstNothing mcs)
+takeTillFirstNothing (Nothing:_)  = []
+takeTillFirstNothing [] = []
 
 renderDisplay :: Show a => Music a -> Music a -> String
 renderDisplay m n =

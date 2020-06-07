@@ -1,0 +1,3 @@
+#!/bin/bash
+
+grep -n TODO *.hs | sed 's/:[ -].*TODO/  TODO/'
