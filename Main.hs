@@ -5,10 +5,11 @@ module Main where
 import Euterpea hiding(a,as,b,bs,c,cs,d,ds,e,es,f,fs,g,gs, left, right)
 import System.Random
 import System.IO
+import Control.Monad
 import Control.Concurrent
 import Control.Exception as E
 import Control.Concurrent.STM
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, sort)
 import System.Process
 import EvoGen
 import Control.DeepSeq
@@ -61,85 +62,140 @@ main = do
     (sendToPlayer, sendControls, clearControls, stop) <- spawnPlaybackChannel showPlayback -- all instructions take effect after the current measure
 
     let queuePlay = sendToPlayer . loadPiece . traceShowId
-        act :: [[Form]] -> Maybe Piece -> IO ()
-        act changes playing = do -- TODO playing should not be set in here but instead from what is actually playing
+        act :: [[Form]] -> Bool -> IO ()
+        -- TODO playing should not be set in here but instead from what is actually playing
+        act changes playing = do
             let continue = act changes playing
-                pauseAndContinue = stop >> act changes Nothing
-                playAndContinue chas p  = queuePlay p >> (act chas $ Just p)
-                playChangesAndContinue chas =
-                    case chas of []   -> act [] Nothing
-                                 (x:_)-> case parseToPiece x of Nothing -> stop >> act chas Nothing
-                                                                Just p  -> playAndContinue chas p
+                playChanges [] = stop >> act [] False
+                playChanges c@(x:xs) = case reify x of
+                    Nothing -> playChanges xs
+                    Just p  -> queuePlay p >> act c True
 
             c <- getChar
-            showMain $ "Entered: " ++ show c --TODO have a change set displayed (like 10x mutations)
+            showMain $ "Entered: " ++ show c --TODO have a change set displayed (like number of queued mutations)
             -- Start Interface
             case c of 'n' -> do -- generate and play a new piece
                               stdGen <- newStdGen
-                              let p = createPiece stdGen
-                              playAndContinue ([Form 0 $ show stdGen]:changes) p
+                              playChanges ([Form 0 (show stdGen)]:changes)
                       'p' -> do -- pause / unpause playing music
-                              case playing of Just _  -> pauseAndContinue
-                                              Nothing -> playChangesAndContinue changes
+                              if playing
+                                  then stop >> act changes False
+                                  else playChanges changes
                       'm' -> do -- perform a random mutation of the playing track
-                              case playing of Just x -> do
-                                                          stdGen <- newStdGen
-                                                          let p = mutate x stdGen
-                                                              (y:ys) = changes
-                                                              (Form lf _) =  last y -- mutated track has same fitness as its predecessor
-                                                              cur = y ++ [(Form lf $ show stdGen)]
-                                                          playAndContinue (cur:ys) p
-                                              Nothing -> continue
-                      'f' -> do -- TODO interbreed tracks
-                              case playing of Just _  -> continue -- TODO combine current track with random other
-                                              Nothing -> continue -- TODO combine two random tracks
+                              if playing
+                                  then do
+                                      stdGen <- newStdGen
+                                      let y:ys = changes
+                                          Form lf _ =  last y -- mutated track has same fitness as its predecessor
+                                          cur = y ++ [(Form lf $ show stdGen)]
+                                      playChanges (cur:ys)
+                                  else continue
+                      'f' -> do -- interbreed tracks
+                              stdGen <- newStdGen
+                              let (ug, og) = split stdGen
+                              if playing
+                                  then do
+                                      case changes of
+                                          (x:xs) -> do
+                                              let mChild = urges ug [Just x, findMate og xs]
+                                              case mChild of
+                                                  Nothing -> continue
+                                                  Just child -> playChanges (child:changes)
+                                          _ -> continue
+                                  else do
+                                      case changes of
+                                          (_:_:_) -> do
+                                              let (fg, sg) = split og
+                                                  mFstPar = findMate fg changes
+                                                  sndPar = findMate sg changes -- TODO filter out fstPar
+                                                  mChild = urges ug [mFstPar, sndPar]
+                                              case mChild of
+                                                  Nothing -> continue
+                                                  Just child -> playChanges (child:changes)
+                                          _ -> continue
                       'b' -> do -- go back one step
-                              case changes of []    -> pauseAndContinue
-                                              (_:xs)-> playChangesAndContinue xs
+                              case changes of
+                                  ((_:ys):xs) -> playChanges (ys:xs)
+                                  _ -> playChanges changes
                       'e' -> continue -- TODO edit piece as text
                       'w' -> do -- write songs to file (takes more input)
                               filename <- getLine
                               saveToFile filename (unlines $ map show changes)
                               continue
                       'r' -> do -- read file and play (takes more input)
-                              getLine >>= readFormFile >>= playChangesAndContinue
-                      'u' -> continue -- TODO up vote for current piece makes it more used by 'f'
-                      'd' -> continue -- TODO down vote for current piece makes it less used by 'f'
-                      'c' -> do -- Control Euterpea "Control"s (takes more input)
+                              getLine >>= readFormFile >>= playChanges
+                      'u' -> do -- up vote for current piece makes it more used by 'f'
+                              let (y:ys) = changes
+                                  (Form lf x) = last y
+                                  updated = (init y) ++ [Form (lf+1) x]
+                              act (updated:ys) playing
+                      'd' -> do -- down vote for current piece makes it less used by 'f'
+                              let (y:ys) = changes
+                                  (Form lf x) = last y
+                                  updated = (init y) ++ [Form (lf-1) x]
+                              act (updated:ys) playing
+                      'c' -> do -- control Euterpea "Control"s (takes more input)
                               ic <- getChar
                               if ic == 'c'
                                   then clearControls
-                                  else case playing of  Just _  -> musicControl ic sendControls
-                                                        Nothing -> return ()
+                                  else musicControl ic >>= sendControls
                               continue
                       _   -> do -- nothing, default case
                               continue
             -- End Interface
-    act [] Nothing
+    act [] False
 
-parseToPiece :: [Form] -> Maybe Piece
-parseToPiece []              = Nothing
-parseToPiece ((Form _ i):ms) =
+reify :: [Form] -> Maybe Piece
+reify []              = Nothing
+reify ((Form _ i):ms) =
     let root = createPiece $ (read i :: StdGen)
         folder p (Form _ m) = mutate p $ (read m :: StdGen)
     in  Just $ foldl folder root ms
 
+urges :: RandomGen g => g -> [Maybe [Form]] -> Maybe [Form]
+urges g p = case sequence p of
+    Nothing -> Nothing
+    Just (x:y:[]) -> Just $ fuck g x y
+    Just _ -> error "Too many partners (for now)!"
+
+findMate :: RandomGen g => g -> [[Form]] -> Maybe [Form]
+findMate g l = select (sort l) $ fst $ randomR (0, (length l)) g
+    where select [] _ = Nothing
+          select [[]] _ = Nothing
+          select ([]:xs) i = select xs i
+          select (x:xs) i  =
+              let post = i - fitness (last x)
+              in if post <= 0 then Just x else select xs post
+
+-- TODO move to EvoGen.hs
+-- TODO generalize to more then two participants
+-- TODO block self fertilization?
+fuck :: RandomGen g => g -> [Form] -> [Form] -> [Form]
+fuck g = fuck' $ randomRs (0, 1) g
+    where fuck' :: [Int] -> [Form] -> [Form] -> [Form]
+          fuck' [] _ _ = [] -- pathological case
+          fuck' _ f [] = f
+          fuck' _ [] f = f
+          fuck' (x:xs) (f1:f1s) (f2:f2s) = (if x == 0 then f1 else f2):fuck' xs f1s f2s
 
 readFormFile :: String -> IO [[Form]]
 readFormFile filename= do
     contents <- readFile filename
     return $ map (\a -> (read a) :: [Form]) $ filter (isPrefixOf "[") $ lines contents
 
-musicControl :: Char -> (Control -> IO ()) -> IO ()
-musicControl c out =
-    do
-      case c of 't' -> do -- enter tempo like 1 % 4
-                        at <- getLine
-                        let t = read at :: Dur
-                        out $ Tempo t
-                _   -> return ()
+musicControl :: Char -> IO (Maybe Control)
+musicControl 't' = liftM (Just . Tempo . reader) getLine -- enter tempo exactly of form "Int % Int" eg "1 % 4"
+    where reader at = read at :: Dur
+musicControl _ = return Nothing
 
-data Form = Form Int String deriving (Read, Show) -- TODO add: | Int Piece
+data Form = Form {
+        fitness :: Int,
+        gener   :: String
+    } deriving (Read, Show) -- TODO add: | Int Piece so reification can be done for perf
+instance Eq Form where
+    (==) (Form a _) (Form b _) = a == b
+instance Ord Form where
+    compare (Form a _) (Form b _) = compare a b
 
 {--
  - Utility functions for IO
@@ -148,65 +204,66 @@ pp :: PlayParams
 pp = defParams{closeDelay=0} -- may need to tune this but it is better then the 1 second delay
 
 -- based off of https://wiki.haskell.org/Background_thread_example
-spawnPlaybackChannel :: (Show a, ToMusic1 a, NFData a) => (String -> IO()) -> IO (Music a -> IO (), Control -> IO (), IO (), IO ())
+spawnPlaybackChannel :: (Show a, ToMusic1 a, NFData a) => (String -> IO()) -> IO (Music a -> IO (), Maybe Control -> IO (), IO (), IO ())
 spawnPlaybackChannel renderF = do
     workVar <- atomically newEmptyTMVar
     contQueue <- atomically newTQueue
 
     let write j = atomically(do
-                              empty <- isEmptyTMVar workVar
-                              if empty
-                                  then putTMVar workVar j
-                                  else swapTMVar workVar j >> return ())
+            empty <- isEmptyTMVar workVar
+            if empty
+                then putTMVar workVar j
+                else swapTMVar workVar j >> return ())
         control j = atomically(writeTQueue contQueue j)
         clearControls = control Nothing
-        stop      = write Nothing
+        stop = write Nothing
         die err = do
-                   tid <- myThreadId
-                   print ("Playback Thread " ++ show tid ++ " died with exception " ++ show (err :: ErrorCall))
-                   stop
+            tid <- myThreadId
+            print ("Playback Thread " ++ show tid ++ " died with exception " ++ show (err :: ErrorCall))
+            stop
         pieceWork _ ec [] = work 0 ec
         pieceWork i ec xs = do
-                   noNewMessage <- atomically $ isEmptyTMVar workVar -- peek at the state
-                   if noNewMessage
-                      then do
-                          -- play loop run on every measure start!!
-                          let safe = if i < length xs then i else 0
-                              bm = xs!!safe
-                              nextI = (safe+1) `mod` (length xs)
+            noNewMessage <- atomically $ isEmptyTMVar workVar -- peek at the state
+            if noNewMessage
+                -- play loop run on every measure start!!
+                then do
+                    let safe = if i < length xs then i else 0
+                        bm = xs!!safe
+                        nextI = (safe+1) `mod` (length xs)
 
-                          -- see if there are new controls
-                          incoming <- atomically(readAllFromTQueue contQueue)
-                          let controls = takeTillFirstNothing $ (reverse incoming) ++ (map Just ec)
+                    -- see if there are new controls
+                    incoming <- atomically(readAllFromTQueue contQueue)
+                    let controls = takeFromLastNothing $ (map Just ec) ++ incoming
 
-                          renderF $ renderDisplay bm (xs!!nextI)
-                          playC pp $ foldl (\m c -> Modify c m) bm controls
-                          -- TODO write playing back to boost up score of track
-                          pieceWork nextI controls xs
-                      else work i ec
+                    renderF $ renderDisplay bm (xs!!nextI)
+                    playC pp $ foldl (\m c -> Modify c m) bm controls
+                    -- TODO write playing back to boost up score of track
+                    pieceWork nextI controls xs
+                else work i ec
         work :: Int -> [Control] -> IO ()
-        work i c  =
-            do
-                mJob <- atomically(takeTMVar workVar) -- this should block on receiving a value but I don't think it does??
-                case mJob of Nothing -> work 0 c -- waiting on a new job
-                             Just music -> E.catch (pieceWork i c $ lineToList music) die
+        work i c  = do
+            mJob <- atomically(takeTMVar workVar)
+            case mJob of
+                Nothing -> work 0 c -- waiting on a new job
+                Just music -> E.catch (pieceWork i c $ lineToList music) die
 
     _ <- forkIO $ work 0 []
 
-    return (write . Just, control . Just, clearControls, stop)
+    return (write . Just, control, clearControls, stop)
 
 readAllFromTQueue :: TQueue a -> STM [a]
 readAllFromTQueue q = do
-                        m <- tryReadTQueue q
-                        case m of Just a  -> do
-                                              sub <- readAllFromTQueue q -- I think this breaks tail recursion optimization but I don't know how else to do it :(
-                                              return $ a:sub
-                                  Nothing -> return []
+    m <- tryReadTQueue q
+    case m of
+        Just a  -> do
+            sub <- readAllFromTQueue q -- I think this breaks tail recursion optimization but I don't know how else to do it :(
+            return $ a:sub
+        Nothing -> return []
 
-takeTillFirstNothing :: [Maybe a] -> [a]
-takeTillFirstNothing ((Just c):mcs) = c:(takeTillFirstNothing mcs)
-takeTillFirstNothing (Nothing:_)  = []
-takeTillFirstNothing [] = []
+takeFromLastNothing :: [Maybe a] -> [a]
+takeFromLastNothing ((Just c):xs) = c:takeFromLastNothing xs
+takeFromLastNothing (Nothing:xs)  = takeFromLastNothing xs
+takeFromLastNothing [] = []
 
 renderDisplay :: Show a => Music a -> Music a -> String
 renderDisplay m n =
@@ -238,16 +295,16 @@ spawnUXChannel = do
     stateVar <- atomically (newTVar ("", ""))
 
     let render = do
-                  d <- readTVarIO isDirty
-                  if d == True
-                    then do
-                      (a,b) <- readTVarIO stateVar
-                      callCommand "clear"
-                      putStrLn $ a ++ "\n" ++ b
-                      clean
-                    else return ()
-                  yield
-                  render
+            d <- readTVarIO isDirty
+            if d == True
+                then do
+                    (a,b) <- readTVarIO stateVar
+                    callCommand "clear"
+                    putStrLn $ a ++ "\n" ++ b
+                    clean
+                else return ()
+            yield
+            render
         dirty = atomically $ writeTVar isDirty True
         clean = atomically $ writeTVar isDirty False
         write (Left m)  = atomically(modifyTVar stateVar (\(_,b) -> (m, b))) >> dirty
