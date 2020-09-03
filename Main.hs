@@ -2,7 +2,7 @@
 -- stack --resolver lts-12.21 script
 module Main where
 
-import Euterpea hiding(a,as,b,bs,c,cs,d,ds,e,es,f,fs,g,gs, left, right)
+import Euterpea hiding(a,as,b,bs,c,cs,d,ds,e,es,f,fs,g,gs, left, right, merge)
 import System.Random
 import System.IO
 import Control.Monad
@@ -61,51 +61,41 @@ main = do
     (showMain, showPlayback) <- spawnUXChannel
     (sendToPlayer, sendControls, clearControls, stop) <- spawnPlaybackChannel showPlayback -- all instructions take effect after the current measure
 
-    let queuePlay = sendToPlayer . loadPiece . traceShowId
-        act :: [[Form]] -> Bool -> IO ()
+    let queuePlay = sendToPlayer . loadPiece
+        act :: [Form] -> Bool -> IO ()
         -- TODO playing should not be set in here but instead from what is actually playing
         act changes playing = do
             let continue = act changes playing
                 playChanges [] = stop >> act [] False
-                playChanges c@(x:xs) = case reify x of
-                    Nothing -> playChanges xs
-                    Just p  -> queuePlay p >> act c True
+                playChanges c@(x:_) = queuePlay (reify x) >> act c True
 
             c <- getChar
             showMain $ "Entered: " ++ show c --TODO have a change set displayed (like number of queued mutations)
             -- Start Interface
             case c of 'n' -> do -- generate and play a new piece
                               stdGen <- newStdGen
-                              playChanges ([Form 0 (show stdGen)]:changes)
+                              playChanges ((Form 0 (show stdGen) Self):changes)
                       'p' -> do -- pause / unpause playing music
                               if playing
                                   then stop >> act changes False
                                   else playChanges changes
                       'm' -> do -- perform a random mutation of the playing track
-                              if playing
-                                  then do
+                              case changes of
+                                  (Form f g _):ys -> do
                                       stdGen <- newStdGen
-                                      let y:ys = changes
-                                          Form lf _ =  last y -- mutated track has same fitness as its predecessor
-                                          cur = y ++ [(Form lf $ show stdGen)]
-                                      playChanges (cur:ys)
-                                  else continue
+                                      playChanges ((Form f (show stdGen) (MutatedFrom g)):changes)
+                                  _ -> continue
                       'f' -> do -- interbreed tracks
                               stdGen <- newStdGen
-                              let (ug, og) = split stdGen
                               if playing
                                   then do
                                       case changes of
-                                          (x:xs) -> do
-                                              let mChild = urges ug [Just x, findMate og xs]
-                                              case mChild of
-                                                  Nothing -> continue
-                                                  Just child -> playChanges (child:changes)
+                                          (x:xs) -> playChanges ((birth stdGen x (findMate xs)):changes)
                                           _ -> continue
                                   else do
                                       case changes of
                                           (_:_:_) -> do
-                                              let (fg, sg) = split og
+                                              let (fg, sg) = split stdGen
                                                   mFstPar = findMate fg changes
                                                   sndPar = findMate sg changes -- TODO filter out fstPar
                                                   mChild = urges ug [mFstPar, sndPar]
@@ -115,7 +105,7 @@ main = do
                                           _ -> continue
                       'b' -> do -- go back one step
                               case changes of
-                                  ((_:ys):xs) -> playChanges (ys:xs)
+                                  (_:xs) -> playChanges xs
                                   _ -> playChanges changes
                       'e' -> continue -- TODO edit piece as text
                       'w' -> do -- write songs to file (takes more input)
@@ -125,15 +115,15 @@ main = do
                       'r' -> do -- read file and play (takes more input)
                               getLine >>= readFormFile >>= playChanges
                       'u' -> do -- up vote for current piece makes it more used by 'f'
-                              let (y:ys) = changes
-                                  (Form lf x) = last y
-                                  updated = (init y) ++ [Form (lf+1) x]
-                              act (updated:ys) playing
+                              case changes of
+                                  (x:xs) ->
+                                      act (x{fitness=(fitness x) + 1}:xs) playing
+                                  _ -> continue
                       'd' -> do -- down vote for current piece makes it less used by 'f'
-                              let (y:ys) = changes
-                                  (Form lf x) = last y
-                                  updated = (init y) ++ [Form (lf-1) x]
-                              act (updated:ys) playing
+                              case changes of
+                                  (x:xs) ->
+                                      act (x{fitness=(fitness x) - 1}:xs) playing
+                                  _ -> continue
                       'c' -> do -- control Euterpea "Control"s (takes more input)
                               ic <- getChar
                               if ic == 'c'
@@ -145,38 +135,23 @@ main = do
             -- End Interface
     act [] False
 
-reify :: [Form] -> Maybe Piece
-reify []              = Nothing
-reify ((Form _ i):ms) =
-    let root = createPiece $ (read i :: StdGen)
-        folder p (Form _ m) = mutate p $ (read m :: StdGen)
-    in  Just $ foldl folder root ms
+reify :: Form -> Piece
+reify f = reify' f
+    where reify' (Form _ i Self)            = createPiece (read i :: StdGen)
+          reify' (Form _ i (MutatedFrom p)) = mutate (reify' p) (read i :: StdGen)
+          reify' (Form _ i (BirthedBy x y)) = merge (read i :: StdGen) (reify' x) (reify' y)  -- TODO reversed for each level of birthing flip whether to accept the incoming result or reflip
 
-urges :: RandomGen g => g -> [Maybe [Form]] -> Maybe [Form]
-urges g p = case sequence p of
-    Nothing -> Nothing
-    Just (x:y:[]) -> Just $ fuck g x y
-    Just _ -> error "Too many partners (for now)!"
-
-findMate :: RandomGen g => g -> [[Form]] -> Maybe [Form]
+findMate :: RandomGen g => g -> [Form] -> Maybe Form
 findMate g l = select (sort l) $ fst $ randomR (0, (length l)) g
     where select [] _ = Nothing
-          select [[]] _ = Nothing
-          select ([]:xs) i = select xs i
           select (x:xs) i  =
-              let post = i - fitness (last x)
+              let post = i - fitness x
               in if post <= 0 then Just x else select xs post
 
 -- TODO move to EvoGen.hs
--- TODO generalize to more then two participants
 -- TODO block self fertilization?
-fuck :: RandomGen g => g -> [Form] -> [Form] -> [Form]
-fuck g = fuck' $ randomRs (0, 1) g
-    where fuck' :: [Int] -> [Form] -> [Form] -> [Form]
-          fuck' [] _ _ = [] -- pathological case
-          fuck' _ f [] = f
-          fuck' _ [] f = f
-          fuck' (x:xs) (f1:f1s) (f2:f2s) = (if x == 0 then f1 else f2):fuck' xs f1s f2s
+birth :: RandomGen g => g -> Form -> Form -> Form
+birth g x y = Form ((fitness x + fitness y) / 2) (show g) (BirthedBy x y)
 
 readFormFile :: String -> IO [[Form]]
 readFormFile filename= do
@@ -190,12 +165,15 @@ musicControl _ = return Nothing
 
 data Form = Form {
         fitness :: Int,
-        gener   :: String
+        gener   :: String,
+        genesis :: Genesis
     } deriving (Read, Show) -- TODO add: | Int Piece so reification can be done for perf
 instance Eq Form where
-    (==) (Form a _) (Form b _) = a == b
-instance Ord Form where
-    compare (Form a _) (Form b _) = compare a b
+    (==) (Form _ a _) (Form _ b _) = a == b
+instance Ord Form where -- TODO sorting by longest Genesis list would decrease unbalance of evolution?
+    compare (Form a _ _) (Form b _ _) = compare a b
+
+data Genesis = MutatedFrom Form | BirthedBy Form Form | Self deriving (Read, Show)
 
 {--
  - Utility functions for IO
@@ -204,7 +182,7 @@ pp :: PlayParams
 pp = defParams{closeDelay=0} -- may need to tune this but it is better then the 1 second delay
 
 -- based off of https://wiki.haskell.org/Background_thread_example
-spawnPlaybackChannel :: (Show a, ToMusic1 a, NFData a) => (String -> IO()) -> IO (Music a -> IO (), Maybe Control -> IO (), IO (), IO ())
+spawnPlaybackChannel :: (Show a, ToMusic1 a, NFData a) => (String -> IO()) -> IO ([Music a] -> IO (), Maybe Control -> IO (), IO (), IO ())
 spawnPlaybackChannel renderF = do
     workVar <- atomically newEmptyTMVar
     contQueue <- atomically newTQueue
@@ -245,7 +223,7 @@ spawnPlaybackChannel renderF = do
             mJob <- atomically(takeTMVar workVar)
             case mJob of
                 Nothing -> work 0 c -- waiting on a new job
-                Just music -> E.catch (pieceWork i c $ lineToList music) die
+                Just music -> E.catch (pieceWork i c music) die
 
     _ <- forkIO $ work 0 []
 

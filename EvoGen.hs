@@ -16,18 +16,16 @@ import Data.Ratio
  - instead to save a list of what operations are applied to them.
  -}
 
-data Piece = Piece { seed  :: Int, -- the initial random seed used to generate the Piece
-                     beats :: Int, -- how many beats per measure in the Piece
+data Piece = Piece { beats :: Int, -- how many beats per measure in the Piece
                      parts :: [Part] -- sequential ordered segments of the Piece
                    } deriving (Show, Read, Eq)
 
-data Part = Part { pSeed   :: Int, -- seed used to generate the initial Part
-                   repeats :: Int, -- how many times to repeat this part for within the piece
+data Part = Part { repeats :: Int, -- how many times to repeat this part for within the piece
                    tracks  :: [Track] -- different instruments that play simultaneously for this part
                  } deriving (Show, Read, Eq)
 
 -- TODO weights 
-data Track = Track  { tSeed :: Int, -- seed used to generate notes for this track
+data Track = Track  { seed :: Int, -- seed used to generate notes for this track
                       inst  :: Int, -- the instrument used by this track
                       playWeight :: Int, -- make the track more/less likely to play notes
                       noteDurWeight :: Int, -- make the track tend towards long/short notes
@@ -71,20 +69,51 @@ percussionRange = (0, 46) -- 47 percussion instruments are defined in Euterpea
 
 createPiece :: RandomGen g => g -> Piece
 createPiece g = fst $ runState (do
-        s <- ra
         instCount <- randomInRange (1, 10) -- hard coded for now
         instruments <- randomsInRange instCount percussionRange
 
         partCount <- randomInRange (1,4) -- hard coded for now
-        partSeeds <- ras partCount
-        return Piece {seed=s,
-                      beats=4, -- TODO letz waltz ... or whatever else
-                      parts=map ((createPart instruments) . mkStdGen) partSeeds}
-      ) g
-    where ra = state random
-          randomInRange = state . randomR
+        parseeds <- ras partCount
+        return Piece {beats=4, -- TODO letz waltz ... or whatever else
+                      parts=map ((createPart instruments) . mkStdGen) parseeds}
+    ) g
+    where randomInRange = state . randomR
           ras = state . randoms'
           randomsInRange i r = state $ randomRs' i r
+
+-- cannot use the semigroup <> operator since I want the RandomGen to lead to different children from the same parents
+{- Implementation notes:
+ -
+ - Track merging within a Part is relatively simple:
+ -  match up instrument types between parents and choose one or further merge them when there are two
+ -  if only one side has that instrument then choose between it and nothing
+ -  random coin flips consistently generated from a seed do the choosing
+ -
+ - Part merging is a little more complicated:
+ -  Bound the maximum number of repeats by some constant
+ -  Divide that space into 3 (or whatever) spaces: small, medium, large
+ -  Go through the list with a function for each size that can merge parts if they are the same size
+ -  if they aren't the same size then the large function steps down to medium etc. for one or both of its args
+ -  if only one is not "large" (or whatever) then it may group together multiple of the others
+ -  priority is always given to the largest type
+ -  to merge it may choose one or the other (the other can be "nothing" too) or
+ -  half of one or the other or
+ -  intersperse them or something else
+ -}
+merge :: RandomGen g => g-> Piece -> Piece -> Piece
+merge g p1 p2 = fst $ runState (do
+        p1Beats <- state random
+        partsSeed <- state random
+
+        return Piece {beats= beats(if p1Beats then p1 else p2),
+                      parts= mergeParts (mkStdGen partsSeed) (parts p1) (parts p2)}
+    ) g
+
+mergeParts :: RandomGen g => g -> [Part] -> [Part] -> [Part]
+mergeParts _ [] bs = bs
+mergeParts _ as [] = as
+mergeParts g (a:as) (b:bs) = (if heads then a else b):mergeParts ng as bs
+    where (heads, ng) = random g
 
 randoms' :: (RandomGen g, Random a) => Int -> g -> ([a], g)
 randoms' i g = ((take i $ randoms g), fst $ split g)
@@ -95,9 +124,7 @@ randomRs' i r g = ((take i $ randomRs r g), fst $ split g)
 createPart :: RandomGen g => [Int] -> g -> Part
 createPart insts gen =
     let (lg, sg) = split gen
-        (val, nlg) = random lg
-    in  Part { pSeed=val,
-               repeats=rLimitedPowerOfTwo nlg,
+    in  Part { repeats=rLimitedPowerOfTwo lg,
                tracks=createTracks insts sg}
 
 createTracks :: RandomGen g => [Int] -> g -> [Track]
@@ -110,7 +137,7 @@ createTracks (i:is) gen =
 createTrack :: Int -> Int -> Track
 createTrack i s = 
     let (pw:nw:rw:_) = randomRs (-10, 10) (mkStdGen s)
-    in  Track {tSeed=s,
+    in  Track {seed=s,
                inst=i,
                playWeight=pw,
                noteDurWeight=nw,
@@ -254,15 +281,15 @@ mutateRandomInList f g list =
  - For example the phrase function can be used like `phrase [Dyn $ Accent 0.5]` to make a note
  - half intensity. This could be combined in different patterns (every other, or per measure, etc.)
  -}
-loadPiece :: Piece -> Music Pitch -- this Music a should be at the top level a "line" of measures
-loadPiece (Piece _ b p) = line $ foldl (++) [] $ map (partToMeasures b) p
+loadPiece :: Piece -> [Music Pitch] -- this Music a should be at the top level a "line" of measures
+loadPiece (Piece b p) = foldl (++) [] $ map (partToMeasures b) p
 
 partToMeasures :: Int -> Part -> [Music Pitch]
 partToMeasures b pa = take (repeats pa) $ repeat (chord $ map (trackToMeasure b) (tracks pa))
 
 -- TODO triplets!
 trackToMeasure :: Int -> Track -> Music Pitch
-trackToMeasure b Track{tSeed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDurWeight=rw} =
+trackToMeasure b Track{seed=s, inst=i, playWeight=pw, noteDurWeight=nw, restDurWeight=rw} =
     let randomBounds@(lower,higher) = (1,100)
         sound = perc (toEnum i::PercussionSound)
         randomList = randomRs randomBounds (mkStdGen s)
