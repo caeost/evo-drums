@@ -6,7 +6,8 @@ cat Main.hs \
   | cut -c 13- \
   | grep -v "TODO" \
   | grep -v "case playing of" \
-  | sed 's/_/other key/' \
+  | sed 's/^_/other key/' \
+  | grep -v '_ -> ' \
   | sed 's/-- //' \
   | sed 's/case c of /input one:/' \
   | sed 's/getLine.*$/Enter characters ending with an enter key/' \
